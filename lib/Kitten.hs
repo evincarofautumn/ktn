@@ -31,12 +31,25 @@ import Data.Vector (Vector)
 import GHC.Types (Type)
 import qualified Text.Megaparsec as Megaparsec
 
+-- | The type of annotations in the given compiler phase.
+type family Anno (phase :: Phase) :: Type where
+  Anno 'Parsed = ()
+  Anno 'Renamed = ()
+  Anno 'Typechecked = Ty
+  Anno 'Desugared = Ty
+
 -- | The radix of an numeric literal.
-data Base
-  = Bin
-  | Oct
-  | Dec
-  | Hex
+data Base :: Type where
+  Bin :: Base
+  Oct :: Base
+  Dec :: Base
+  Hex :: Base
+  deriving (Show)
+
+-- | The boxity of a term that may be unboxed or boxed.
+data Box :: Type where
+  Unbox :: Box
+  Box :: Box
   deriving (Show)
 
 -- | Bracketing of a token: whether it may be a layout token. After bracketing,
@@ -247,7 +260,7 @@ data InstDef :: Phase -> Type where
     , instBody :: !(Maybe (Term p))
     } -> InstDef p
 
-deriving instance (Show (Name p)) => Show (InstDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (InstDef p)
 
 -- | The precision and range of an integer.
 data IntBits :: Type where
@@ -388,8 +401,220 @@ deriving instance (Show (Name p)) => Show (Sig p)
 
 -- | An expression term, indexed by the compiler 'Phase'.
 data Term :: Phase -> Type where
-  Term :: Term p
-  deriving (Show)
+
+  -- A term annotated with a type:
+  --
+  -- > term as T
+  --
+  -- Or, when applied as a section, the identity function specialized to a
+  -- particular type (and arity) for documenting or debugging the type of the
+  -- current program state:
+  --
+  -- > (as T1, ..., TN)
+  -- > // =
+  -- > (-> temp1 as T1, ..., tempn as TN; temp1 ... tempn)
+  --
+  -- It is necessary to differentiate these two because when a term is annotated
+  -- with a type, the type needs to be scoped over the whole term in order to
+  -- correctly maintain polymorphism.
+  --
+  -- > "as" <sig>
+  -- > "(" "as" <sig> ("," <sig>)* ")"
+  As
+    :: Anno p
+    -> !(Maybe (Term p))
+    -> !(Sig p)
+    -> Term p
+
+  -- > <term> <term>
+  Compose
+    :: Anno p
+    -> !(Term p)
+    -> !(Term p)
+    -> Term p
+
+  -- > "call"
+  Call
+    :: Anno p
+    -> Loc
+    -> Term p
+
+  -- > "do" "(" <term>* ")" <block>
+  Do
+    :: Anno p
+    -> !(Term p)
+    -> !(Term p)
+    -> Term p
+
+  Generic
+    :: !Loc
+    -> !Unqual
+    -> !(Term p)
+    -> Term p
+
+  -- > "(" <term> ")"
+  Group
+    :: !Loc
+    -> !(Term p)
+    -> Term p
+
+  -- >
+  Identity
+    :: Anno p
+    -> !Loc
+    -> Term p
+
+  -- > "if" ("(" <term> ")")?
+  -- >     <block>
+  -- >   ("elif" "(" <term> ")" <block>)*
+  -- >   ("else" <block>)?
+  If
+    :: !Loc
+    -> Anno p
+    -> !(Maybe (Term p))
+    -> !(Vector (Loc, Term p, Term p))
+    -> !(Maybe (Loc, Term p))
+    -> Term p
+
+  -- If the name is infix but the call is postfix, this is an operator invoked
+  -- as a postfix function; if the call is infix, it's a normal infix operator
+  -- call. If the name is postfix, the call is always postfix, since there's
+  -- currently no notation for using a named word as an infix operator.
+  --
+  -- > <name>
+  -- > "(" <op> ")"
+  Invoke
+    :: Anno p
+    -> !Loc
+    -> !Fixity
+    -> !(Name p)
+    -> Term p
+
+  -- > "jump"
+  Jump
+    :: Anno p
+    -> Loc
+    -> Term p
+
+  -- Lexical lifetimes, create new scope:
+  -- Lambda
+  --   :: !Loc
+  --   -> !(Vector (Loc, Maybe Unqual, Maybe (Sig p)))
+  --   -> !(Term p)
+  --   -> Term p
+  --
+  -- Non-lexical lifetimes, just introduce variable:
+  -- Lambda
+  --   :: !Loc
+  --   -> !(Vector (Loc, Maybe Unqual, Maybe (Sig p)))
+  --   -> Term p
+
+  -- > "[" (<term>* ("," <term>*)*)? ","? "]"
+  -- > "[|" (<term>* ("," <term>*)*)? ","? "|]"
+  List
+    :: Anno p
+    -> !Loc
+    -> !Box
+    -> !(Vector (Term p))
+    -> Term p
+
+  -- > "loop"
+  Loop
+    :: Anno p
+    -> Loc
+    -> Term p
+
+  -- > "match" ("(" <term> ")")?
+  -- >   ("case" <name> <block>)*
+  -- >   ("else" <block>)?
+  Match
+    :: Anno p
+    -> !Loc
+    -> !(Maybe (Term p))
+    -> !(Vector (Loc, Unqual, Term p))
+    -> !(Maybe (Loc, Term p))
+    -> Term p
+
+  -- A fully applied infix operator call.
+  --
+  -- > <term>* <name> <term>*
+  Operator
+    :: Anno p
+    -> !Loc
+    -> !(Term p)
+    -> !(Name p)
+    -> !(Term p)
+    -> Term p
+
+  -- > "'" (<esc> | <char>) "'"
+  -- > U+2018 (<esc> | <char>) U+2019
+  PushChar
+    :: Anno p
+    -> !Loc
+    -> !Enc
+    -> !CharLit
+    -> Term p
+
+  -- > /[-+U+2212]?[0-9]+\.[0-9]+([Ee][-+U+2212]?[0-9]+)?(f[0-9]+)?/
+  PushFloat
+    :: Anno p
+    -> !Loc
+    -> !FloatLit
+    -> Term p
+
+  -- > /[-+U+2212]?(0(b[01]+|o[0-7]+|x[0-9A-Fa-f]+|[0-9])|[1-9][0-9]*)(i[0-9]+|u[0-9]+)?/
+  PushInt
+    :: Anno p
+    -> !Loc
+    -> !IntLit
+    -> Term p
+
+  -- > '"""' <lf> (<ws>)* ((\1 (<esc> | <char>)*)? <lf>)* '"""'
+  PushPara
+    :: Anno p
+    -> !Loc
+    -> !ParaLit
+    -> Term p
+
+  -- > '"' (<esc> | <char>)* '"'
+  PushText
+    :: Anno p
+    -> !Loc
+    -> !TextLit
+    -> Term p
+
+  -- > "{" (<term>* (";" <term>*))? ";"? "}"
+  -- > "{|" (<term>* (";" <term>*))? ";"? "|}"
+  Quotation
+    :: Anno p
+    -> !Loc
+    -> !Box
+    -> !(Term p)
+    -> Term p
+
+  -- > "\\" <term>
+  Reference
+    :: Anno p
+    -> !Loc
+    -> !(Term p)
+    -> Term p
+
+  -- > "return"
+  Return
+    :: Anno p
+    -> Loc
+    -> Term p
+
+  -- > "(" <name> <term>* ")"
+  -- > "(" <term>* <name> ")"
+  Section
+    :: Anno p
+    -> !Loc
+    -> !(Name p)
+    -> !(Term p + Term p)
+    -> Term p
+
+deriving instance (Show (Anno p), Show (Name p)) => Show (Term p)
 
 -- | The contents of a text literal.
 data TextLit :: Type where
@@ -403,49 +628,49 @@ data Tok :: Brack -> Type where
   -- Keywords
 
   -- | @about@ keyword.
-  About :: Tok b
+  KwdAbout :: Tok b
   -- | @as@ keyword.
-  As :: Tok b
+  KwdAs :: Tok b
   -- | @case@ keyword.
-  Case :: Tok b
+  KwdCase :: Tok b
   -- | @define@ keyword.
-  Define :: Tok b
+  KwdDefine :: Tok b
   -- | @do@ keyword.
-  Do :: Tok b
+  KwdDo :: Tok b
   -- | @elif@ keyword.
-  Elif :: Tok b
+  KwdElif :: Tok b
   -- | @else@ keyword.
-  Else :: Tok b
+  KwdElse :: Tok b
   -- | @export@ keyword.
-  Export :: Tok b
+  KwdExport :: Tok b
   -- | @if@ keyword.
-  If :: Tok b
+  KwdIf :: Tok b
   -- | @import@ keyword.
-  Import :: Tok b
+  KwdImport :: Tok b
   -- | @instance@ keyword.
-  Instance :: Tok b
+  KwdInstance :: Tok b
   -- | @intrinsic@ keyword.
-  Intrinsic :: Tok b
+  KwdIntrinsic :: Tok b
   -- | @jump@ keyword.
-  Jump :: Tok b
+  KwdJump :: Tok b
   -- | @match@ keyword.
-  Match :: Tok b
+  KwdMatch :: Tok b
   -- | @loop@ keyword.
-  Loop :: Tok b
+  KwdLoop :: Tok b
   -- | @permission@ keyword.
-  Permission :: Tok b
+  KwdPermission :: Tok b
   -- | @return@ keyword.
-  Return :: Tok b
+  KwdReturn :: Tok b
   -- | @synonym@ keyword.
-  Synonym :: Tok b
+  KwdSynonym :: Tok b
   -- | @trait@ keyword.
-  Trait :: Tok b
+  KwdTrait :: Tok b
   -- | @type@ keyword.
-  Type :: Tok b
+  KwdType :: Tok b
   -- | @vocab@ keyword.
-  Vocab :: Tok b
+  KwdVocab :: Tok b
   -- | @with@ keyword.
-  With :: Tok b
+  KwdWith :: Tok b
 
   -- Symbols
 
@@ -531,6 +756,11 @@ data TraitDef :: Phase -> Type where
 -- | The definition of a trait synonym.
 data TraitSyn :: Phase -> Type where
   TraitSyn :: TraitSyn p
+  deriving (Show)
+
+-- | A type in the typechecker.
+data Ty :: Type where
+  Ty :: Ty
   deriving (Show)
 
 -- | The definition of a type.
