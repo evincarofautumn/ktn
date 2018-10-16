@@ -284,15 +284,14 @@ data IntLit :: Type where
   deriving (Show)
 
 -- | The kind of a type variable.
-data Kind :: Phase -> Type where
-  StackKind :: Kind p
-  ValueKind :: Kind p
-  LabelKind :: Kind p
-  PermKind :: Kind p
-  FunKind :: !(Kind p) -> !(Kind p) -> Kind p
-  TypeKind :: !(Name p) -> Kind p
-
-deriving instance (Show (Name p)) => Show (Kind p)
+data Kind :: Type where
+  StackKind :: Kind
+  ValueKind :: Kind
+  LabelKind :: Kind
+  PermKind :: Kind
+  FunKind :: !Kind -> !Kind -> Kind
+  TypeKind :: !(Qual 'Abs) -> Kind
+  deriving (Show)
 
 -- | A source location, spanning between two (row, column) pairs in the same
 -- source.
@@ -381,19 +380,19 @@ data Sig :: Phase -> Type where
     -> !(Vector (Name p))
     -> Sig p
   StackSig
-    :: !(Name p)
+    :: !Unqual
     -> !(Vector (Sig p))
-    -> !(Name p)
+    -> !Unqual
     -> !(Vector (Sig p))
     -> !(Vector (Name p))
     -> Sig p
   VarSig :: Name p -> Sig p
   ForallSig
-    :: !(Vector (Var p))
+    :: !(Vector Var)
     -> Sig p
     -> Sig p
   ExistsSig
-    :: !(Vector (Var p))
+    :: !(Vector Var)
     -> Sig p
     -> Sig p
 
@@ -616,6 +615,10 @@ data Term :: Phase -> Type where
 
 deriving instance (Show (Anno p), Show (Name p)) => Show (Term p)
 
+-- | An existential type variable in a type.
+newtype TEVar = TEVar Var
+  deriving (Show)
+
 -- | The contents of a text literal.
 data TextLit :: Type where
   TextLit :: !(Vector (Esc + Text)) -> TextLit
@@ -758,9 +761,19 @@ data TraitSyn :: Phase -> Type where
   TraitSyn :: TraitSyn p
   deriving (Show)
 
+-- | A type variable in a type.
+newtype TVar = TVar Var
+  deriving (Show)
+
 -- | A type in the typechecker.
 data Ty :: Type where
-  Ty :: Ty
+  TyApp :: !Loc -> !Ty -> !Ty -> Ty
+  TyCon :: !Loc -> !(Qual 'Abs) -> Ty
+  TyVar :: !Loc -> !TVar -> Ty
+  TyEVar :: !Loc -> !TEVar -> Ty
+  TyFun :: !Loc -> !Ty -> !Ty -> Ty
+  TyForall :: !Loc -> !TVar -> !Ty -> Ty
+  TyExists :: !Loc -> !TVar -> !Ty -> Ty
   deriving (Show)
 
 -- | The definition of a type.
@@ -789,10 +802,9 @@ data Unres :: Type where
   deriving (Show)
 
 -- | A variable in a quantifier in a type signature.
-data Var :: Phase -> Type where
-  Var :: !Unqual -> !(Kind p) -> Var p
-
-deriving instance (Show (Name p)) => Show (Var p)
+data Var :: Type where
+  Var :: !Unqual -> !Kind -> Var
+  deriving (Show)
 
 -- | A vocab qualifier.
 data Vocab :: Root -> Type where
