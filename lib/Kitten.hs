@@ -773,10 +773,14 @@ data Tok :: Brack -> Type where
   ListEnd :: Tok b
   -- | Vocabulary lookup: U+003A U+003A COLON or U+2237 PROPORTION.
   Lookup :: !Enc -> Tok b
+  -- | Compile-time quotation: @''@.
+  Quote :: Tok b
   -- | Reference to term: U+005C BACKSLASH.
   Ref :: Tok b
   -- | Sequence delimiter: U+002C COMMA.
   Seq :: Tok b
+  -- | Compile-time splice: U+0023 NUMBER SIGN.
+  Splice :: Tok b
   -- | Terminator: U+003B SEMICOLON.
   Term :: Tok b
   -- | Beginning of unboxed closure: U+007B LEFT CURLY BRACKET U+007C VERTICAL
@@ -977,9 +981,13 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
           Nothing -> ListBegin :@ brackLoc
       , locdsym' "]"      ListEnd
       , locdsym' "\x2237" $ Lookup Unicode
+      -- TODO: character literals
+      , locdsym' "''"     Quote
       -- TODO: operators containing backslash?
       , locdsym' "\\"     Ref
       , locdsym' ","      Seq
+      -- TODO: operators containing #
+      , locdsym' "#"      Splice
       , locdsym' ";"      Term
       , locdsym' "\x2983" $ UnboxedBegin Unicode
       -- TODO: operators containing |

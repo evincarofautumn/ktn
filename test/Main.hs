@@ -61,35 +61,37 @@ spec = do
         -- TODO: < > | \ - _ . \x2192 :
         let
           symbols =
-            "|]\x27E7->\x2192{{|}...\x2026()\
-            \_:::[[|]\x2237\\,;\x2983|}\x2984"
+            "|]\x27E7->\x2192{{|}...\x2026()_\
+            \:::[[|]\x2237''\\,#;\x2983|}\x2984"
 
         locdItem <$> testTokenize symbols
-          `shouldBe`
-          [ Right $ ArrayEnd ASCII
-          , Right $ ArrayEnd Unicode
-          , Right $ Arrow ASCII
-          , Right $ Arrow Unicode
-          , Right $ BlockBegin
-          , Right $ UnboxedBegin ASCII
-          , Right $ BlockEnd
-          , Right $ Ellipsis ASCII
-          , Right $ Ellipsis Unicode
-          , Right $ GroupBegin
-          , Right $ GroupEnd
-          , Right $ Ignore
-          , Right $ Lookup ASCII
-          , Right $ Layout
-          , Right $ ListBegin
-          , Right $ ArrayBegin ASCII
-          , Right $ ListEnd
-          , Right $ Lookup Unicode
-          , Right $ Ref
-          , Right $ Seq
-          , Right $ Term
-          , Right $ UnboxedBegin Unicode
-          , Right $ UnboxedEnd ASCII
-          , Right $ UnboxedEnd Unicode
+          `shouldBe` Right <$>
+          [ ArrayEnd ASCII
+          , ArrayEnd Unicode
+          , Arrow ASCII
+          , Arrow Unicode
+          , BlockBegin
+          , UnboxedBegin ASCII
+          , BlockEnd
+          , Ellipsis ASCII
+          , Ellipsis Unicode
+          , GroupBegin
+          , GroupEnd
+          , Ignore
+          , Lookup ASCII
+          , Layout
+          , ListBegin
+          , ArrayBegin ASCII
+          , ListEnd
+          , Lookup Unicode
+          , Quote
+          , Ref
+          , Seq
+          , Splice
+          , Term
+          , UnboxedBegin Unicode
+          , UnboxedEnd ASCII
+          , UnboxedEnd Unicode
           ]
 
 testTokenize = tokenize (TextName "test") (Row 1)
