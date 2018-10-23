@@ -1,35 +1,48 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 #if __GLASGOW_HASKELL__ >= 806
 {-# LANGUAGE QuantifiedConstraints #-}
 #endif
-{-# LANGUAGE UndecidableInstances #-}
 
 module Kitten
   ( Brack(..)
   , Col(..)
+  , Enc(..)
   , ErrMsg(..)
   , Loc(..)
   , Locd(..)
   , Row(..)
+  , SrcName(..)
   , Tok(..)
   , TokErr(..)
   , type (+)
   , tokenize
   ) where
 
+import Control.Applicative (many, optional)
+import Data.Foldable (asum)
+import Data.Functor.Identity (Identity)
+import Data.Ord (Down(..), comparing)
 import Data.Ratio ((%))
 import Data.Text (Text)
 import Data.Vector (Vector)
+import Data.Void (Void)
 import GHC.Types (Type)
-import qualified Text.Megaparsec as Megaparsec
+import Text.Read (readMaybe)
+import qualified Text.Megaparsec as MP
+import qualified Text.Megaparsec.Char as MC
+import qualified Text.Megaparsec.Char.Lexer as ML
 
 -- | The type of annotations in the given compiler phase.
 type family Anno (phase :: Phase) :: Type where
@@ -44,7 +57,7 @@ data Base :: Type where
   Oct :: Base
   Dec :: Base
   Hex :: Base
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The boxity of a term that may be unboxed or boxed.
 data Box :: Type where
@@ -68,21 +81,21 @@ data BrackErr :: Type where
 -- | The contents of a character literal.
 data CharLit :: Type where
   CharLit :: !(Esc + Char) -> CharLit
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A column in a source location.
-newtype Col = Col Int
-  deriving (Show)
+newtype Col = Col { colVal :: Int }
+  deriving (Eq, Ord, Show)
 
 -- | The encoding of a token with both ASCII and Unicode spellings.
 data Enc :: Type where
   ASCII :: Enc
   Unicode :: Enc
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | An error message.
 newtype ErrMsg = ErrMsg Text
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | An escape in a character, text, or paragraph literal.
 data Esc :: Type where
@@ -184,19 +197,19 @@ data Esc :: Type where
   -- | @"@: U+0022 QUOTATION MARK
   Quot :: Esc
 
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The lexical fixity of a word: 'Infix' for operators, 'Postfix' otherwise.
 data Fixity :: Type where
   Postfix :: Fixity
   Infix :: Fixity
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The precision of a floating-point number.
 data FloatBits :: Type where
   F32 :: FloatBits
   F64 :: FloatBits
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A floating-point literal of the form @FloatLit a b c bits@ denoting the
 -- floating-point number @a * 10 ^ (c - b)@ with precision of @bits@.
@@ -207,7 +220,7 @@ data FloatLit :: Type where
     , floatLitExp :: !Int
     , floatLitBits :: !FloatBits
     } -> FloatLit
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A program fragment, comprising all the top-level program elements and terms
 -- parsed from a source fragment.
@@ -272,7 +285,7 @@ data IntBits :: Type where
   U16 :: IntBits
   U32 :: IntBits
   U64 :: IntBits
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | An integer literal.
 data IntLit :: Type where
@@ -281,7 +294,7 @@ data IntLit :: Type where
     , intLitBase :: !Base
     , intLitBits :: !IntBits
     } -> IntLit
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The kind of a type variable.
 data Kind :: Type where
@@ -297,12 +310,48 @@ data Kind :: Type where
 -- source.
 data Loc :: Type where
   Loc ::
-    { locBeginRow :: !Row
+    { locName :: !SrcName
+    , locBeginRow :: !Row
     , locBeginCol :: !Col
     , locEndRow :: !Row
     , locEndCol :: !Col
     } -> Loc
-  deriving (Show)
+  deriving (Eq, Show)
+
+-- | The 'Ord' instance for 'Loc' sorts lexicographically by source name, then
+-- in /increasing/ order of starting position, and finally in /decreasing/ order
+-- of ending position (length).
+instance Ord Loc where
+  compare a b = mconcat
+    [ comparing locName a b
+    , comparing locBeginRow a b
+    , comparing locBeginCol a b
+    , comparing (Down . locEndRow) a b
+    , comparing (Down . locEndCol) a b
+    ]
+
+instance Semigroup Loc where
+  a <> b
+    | locName a == locName b = Loc
+    { locName = locName a
+    , locBeginRow = beginRow
+    , locBeginCol = beginCol
+    , locEndRow = endRow
+    , locEndCol = endCol
+    }
+    | otherwise = error $ concat
+      [ "internal location error: cannot combine locations from different sources "
+      , show $ locName a
+      , " and "
+      , show $ locName b
+      ]
+    where
+      (beginRow, beginCol)
+        = (locBeginRow a, locBeginCol a)
+        `min` (locBeginRow b, locBeginCol b)
+      (endRow, endCol)
+        = (locEndRow a, locEndCol a)
+        `max` (locEndRow b, locEndCol b)
 
 -- | A local variable name after name resolution.
 data Local :: Type where
@@ -311,8 +360,13 @@ data Local :: Type where
 
 -- | A value decorated with a source location.
 data Locd :: Type -> Type where
-  (:@) :: a -> !Loc -> Locd a
-  deriving (Show)
+  (:@) ::
+    { locdItem :: a
+    , locdLoc :: !Loc
+    } -> Locd a
+  deriving (Eq, Functor, Show)
+
+infixl 5 :@
 
 -- | A definition of metadata.
 data MetaDef :: Phase -> Type where
@@ -329,7 +383,7 @@ type family Name (phase :: Phase) :: Type where
 -- | The contents of a paragraph literal.
 data ParaLit :: Type where
   ParaLit :: !(Vector (Vector (Esc + Text))) -> ParaLit
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The definition of a permission.
 data PermDef :: Phase -> Type where
@@ -368,8 +422,8 @@ data Root :: Type where
   deriving (Show)
 
 -- | A row in a source location.
-newtype Row = Row Int
-  deriving (Show)
+newtype Row = Row { rowVal :: Int }
+  deriving (Eq, Ord, Show)
 
 -- | A parsed type signature.
 data Sig :: Phase -> Type where
@@ -397,6 +451,12 @@ data Sig :: Phase -> Type where
     -> Sig p
 
 deriving instance (Show (Name p)) => Show (Sig p)
+
+-- | The name of a source of code.
+data SrcName :: Type where
+  FileName :: FilePath -> SrcName
+  TextName :: !Text -> SrcName
+  deriving (Eq, Ord, Read, Show)
 
 -- | An expression term, indexed by the compiler 'Phase'.
 data Term :: Phase -> Type where
@@ -622,7 +682,7 @@ newtype TEVar = TEVar Var
 -- | The contents of a text literal.
 data TextLit :: Type where
   TextLit :: !(Vector (Esc + Text)) -> TextLit
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A token, indexed by a 'Brack'eting that indicates whether it has been
 -- 'bracket'ed.
@@ -691,14 +751,14 @@ data Tok :: Brack -> Type where
   ArrayEnd :: !Enc -> Tok b
   -- | Rightwards arrow: U+002D HYPHEN-MINUS U+003E GREATER THAN SIGN or U+2192
   -- RIGHTWARDS ARROW.
-  Arrow :: Tok b
+  Arrow :: !Enc -> Tok b
   -- | Beginning of block: U+007B LEFT CURLY BRACKET.
   BlockBegin :: Tok b
   -- | End of block: U+007D RIGHT CURLY BRACKET.
   BlockEnd :: Tok b
   -- | To-do placeholder or stack kind sigil: U+002E U+002E U+002E PERIOD or
   -- U+2026 HORIZONTAL ELLIPSIS.
-  Ellipsis :: Tok b
+  Ellipsis :: !Enc -> Tok b
   -- | Beginning of group: U+0028 LEFT PARENTHESIS.
   GroupBegin :: Tok b
   -- | End of group: U+0029 RIGHT PARENTHESIS.
@@ -717,6 +777,8 @@ data Tok :: Brack -> Type where
   Ref :: Tok b
   -- | Sequence delimiter: U+002C COMMA.
   Seq :: Tok b
+  -- | Terminator: U+003B SEMICOLON.
+  Term :: Tok b
   -- | Beginning of unboxed closure: U+007B LEFT CURLY BRACKET U+007C VERTICAL
   -- LINE or U+2983 LEFT WHITE CURLY BRACKET.
   UnboxedBegin :: !Enc -> Tok b
@@ -744,12 +806,15 @@ data Tok :: Brack -> Type where
   -- | Word name.
   Word :: Tok b
 
-  deriving (Show)
+  deriving (Eq, Show)
+
+-- | A character tokenizer.
+type Tokenizer = MP.Parsec Void Text
 
 -- | A lexical error.
 data TokErr :: Type where
   TokErr :: !(Locd Text) -> !ErrMsg -> TokErr
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The definition of a trait.
 data TraitDef :: Phase -> Type where
@@ -792,7 +857,7 @@ data TypeSyn :: Phase -> Type where
 -- 'Fixity' describing how the name was used.
 data Unqual :: Type where
   Unqual :: !Fixity -> !Text -> Unqual
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | An unresolved name.
 data Unres :: Type where
@@ -830,8 +895,97 @@ infixl 6 +
 
 -- | Tokenize a source fragment into a stream of tokens interspersed with
 -- lexical errors.
-tokenize :: Text -> [Locd (TokErr + Tok 'Unbrack)]
-tokenize input = error $ "TODO: tokenize " ++ show input
+tokenize :: SrcName -> Row -> Text -> [Locd (TokErr + Tok 'Unbrack)]
+tokenize srcName row input = case MP.runParser tokenizer name input of
+  Left err -> error $ concat
+    [ "internal tokenizer error: "
+    , MP.parseErrorPretty err
+    ]
+  Right result -> result
+  where
+    name :: String
+    name = show srcName
+
+    firstLine :: MP.Pos
+    firstLine = MP.mkPos $ rowVal row
+
+    tokenizer :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
+    tokenizer = do
+      MP.setPosition (MP.SourcePos name firstLine MP.pos1)
+      file
+
+    file :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
+    file = MP.between silence MP.eof tokens
+
+    silence :: Tokenizer ()
+    silence = ML.space MC.space1
+      (ML.skipLineComment "//")
+      (ML.skipBlockCommentNested "/*" "*/")
+
+    locdsym :: Text -> Tokenizer (Locd Text)
+    locdsym = ML.lexeme silence . locd . MC.string
+
+    locdsym' :: Text -> Tok b -> Tokenizer (Locd (e + Tok b))
+    locdsym' sym tok = (Right tok <$) <$> locdsym sym
+
+    tokens :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
+    tokens = many token
+
+    token :: Tokenizer (Locd (TokErr + Tok 'Unbrack))
+    token = asum
+      -- TODO: operators containing <
+      [ locdsym' "<"      $ AngleBegin ASCII
+      , locdsym' "\x27E8" $ AngleBegin Unicode
+      -- TODO: operators containing >
+      , locdsym' ">"      $ AngleEnd ASCII
+      , locdsym' "\x27E9" $ AngleEnd Unicode
+      , locdsym' "\x27E6" $ ArrayBegin Unicode
+      -- TODO: operators containing |
+      , locdsym' "|]"     $ ArrayEnd ASCII
+      , locdsym' "\x27E7" $ ArrayEnd Unicode
+      , locdsym' "->"     $ Arrow ASCII
+      , locdsym' "\x2192" $ Arrow Unicode
+      -- "{" and "{|"
+      , do
+        _ :@ brackLoc <- locd $ MC.string "{"
+        bar <- optional $ locd $ MC.string "|"
+        _ <- silence
+        pure $ Right <$> case bar of
+          Just (_ :@ barLoc) -> UnboxedBegin ASCII :@ brackLoc <> barLoc
+          Nothing -> BlockBegin :@ brackLoc
+      , locdsym' "}"      BlockEnd
+      , locdsym' "..."    $ Ellipsis ASCII
+      , locdsym' "\x2026" $ Ellipsis Unicode
+      , locdsym' "("      GroupBegin
+      , locdsym' ")"      GroupEnd
+      , locdsym' "_"      Ignore
+      -- ":" and "::"
+      , do
+        _ :@ firstLoc <- locd $ MC.string ":"
+        second <- optional $ locd $ MC.string ":"
+        _ <- silence
+        pure $ Right <$> case second of
+          Just (_ :@ secondLoc) -> Lookup ASCII :@ firstLoc <> secondLoc
+          Nothing -> Layout :@ firstLoc
+      -- "[" and "[|"
+      , do
+        _ :@ brackLoc <- locd $ MC.string "["
+        bar <- optional $ locd $ MC.string "|"
+        _ <- silence
+        pure $ Right <$> case bar of
+          Just (_ :@ barLoc) -> ArrayBegin ASCII :@ brackLoc <> barLoc
+          Nothing -> ListBegin :@ brackLoc
+      , locdsym' "]"      ListEnd
+      , locdsym' "\x2237" $ Lookup Unicode
+      -- TODO: operators containing backslash?
+      , locdsym' "\\"     Ref
+      , locdsym' ","      Seq
+      , locdsym' ";"      Term
+      , locdsym' "\x2983" $ UnboxedBegin Unicode
+      -- TODO: operators containing |
+      , locdsym' "|}"     $ UnboxedEnd ASCII
+      , locdsym' "\x2984" $ UnboxedEnd Unicode
+      ]
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
 -- explicit brackets.
@@ -872,3 +1026,25 @@ floatLitVal (FloatLit sig frac ex _bits)
     shift
       | delta < 0 = 1 % 10 ^ negate delta
       | otherwise = 10 ^ delta
+
+locd :: Tokenizer a -> Tokenizer (Locd a)
+locd tok = do
+  begin <- MP.getPosition
+  result <- tok
+  end <- MP.getPosition
+  let loc = locRange begin end
+  pure $ result :@ loc
+
+locRange :: MP.SourcePos -> MP.SourcePos -> Loc
+locRange a b = Loc
+  { locName = case readMaybe $ MP.sourceName a of
+    Just name -> name
+    Nothing -> error $ concat
+      [ "internal tokenizer error: invalid source name "
+      , show (MP.sourceName a)
+      ]
+  , locBeginRow = Row $ MP.unPos $ MP.sourceLine a
+  , locBeginCol = Col $ MP.unPos $ MP.sourceColumn a
+  , locEndRow = Row $ MP.unPos $ MP.sourceLine b
+  , locEndCol = Col $ MP.unPos $ MP.sourceColumn b
+  }

@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 
@@ -19,7 +20,8 @@ main = Haskeline.runInputT Haskeline.defaultSettings loop
         Just "//quit" -> nop
         Just entry -> do
           tokens :: SomeException + [Locd (TokErr + Tok 'Unbrack)]
-            <- liftIO $ try $ evaluate $ tokenize $ Text.pack entry
+            <- liftIO $ try $ evaluate
+            $ tokenize (TextName "interactive") (Row 1) $ Text.pack entry
           Haskeline.outputStrLn $ show tokens
           loop
         Nothing -> nop
