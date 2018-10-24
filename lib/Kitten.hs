@@ -31,6 +31,7 @@ module Kitten
   ) where
 
 import Control.Applicative (many, optional)
+import Data.Char (isAlphaNum)
 import Data.Foldable (asum)
 import Data.Functor.Identity (Identity)
 import Data.Ord (Down(..), comparing)
@@ -932,6 +933,16 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdsym' :: Text -> Tok b -> Tokenizer (Locd (e + Tok b))
     locdsym' sym tok = (Right tok <$) <$> locdsym sym
 
+    locdkwd :: Text -> Tokenizer (Locd Text)
+    locdkwd = ML.lexeme silence . locd
+      . (<* MP.notFollowedBy (MP.try wordChar)) . MC.string
+
+    locdkwd' :: Text -> Tok b -> Tokenizer (Locd (e + Tok b))
+    locdkwd' kwd tok = (Right tok <$) <$> locdkwd kwd
+
+    wordChar :: Tokenizer Char
+    wordChar = MC.satisfy isWordChar
+
     tokens :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
     tokens = many token
 
@@ -993,6 +1004,30 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       -- TODO: operators containing |
       , locdsym' "|}"     $ UnboxedEnd ASCII
       , locdsym' "\x2984" $ UnboxedEnd Unicode
+
+      , locdkwd' "about"      KwdAbout
+      , locdkwd' "as"         KwdAs
+      , locdkwd' "case"       KwdCase
+      , locdkwd' "define"     KwdDefine
+      , locdkwd' "do"         KwdDo
+      , locdkwd' "elif"       KwdElif
+      , locdkwd' "else"       KwdElse
+      , locdkwd' "export"     KwdExport
+      , locdkwd' "export"     KwdExport
+      , locdkwd' "if"         KwdIf
+      , locdkwd' "import"     KwdImport
+      , locdkwd' "instance"   KwdInstance
+      , locdkwd' "intrinsic"  KwdIntrinsic
+      , locdkwd' "jump"       KwdJump
+      , locdkwd' "match"      KwdMatch
+      , locdkwd' "loop"       KwdLoop
+      , locdkwd' "permission" KwdPermission
+      , locdkwd' "return"     KwdReturn
+      , locdkwd' "synonym"    KwdSynonym
+      , locdkwd' "trait"      KwdTrait
+      , locdkwd' "type"       KwdType
+      , locdkwd' "vocab"      KwdVocab
+      , locdkwd' "with"       KwdWith
       ]
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
@@ -1026,6 +1061,11 @@ specialize frag = error $ "TODO: specialize " ++ show frag
 
 --------------------------------------------------------------------------------
 
+(.||.) :: (Monad f) => f Bool -> f Bool -> f Bool
+f .||. g = do
+  x <- f
+  if x then pure True else g
+
 floatLitVal :: Fractional a => FloatLit -> a
 floatLitVal (FloatLit sig frac ex _bits)
   = fromRational $ (fromIntegral sig :: Rational) * shift
@@ -1034,6 +1074,9 @@ floatLitVal (FloatLit sig frac ex _bits)
     shift
       | delta < 0 = 1 % 10 ^ negate delta
       | otherwise = 10 ^ delta
+
+isWordChar :: Char -> Bool
+isWordChar = isAlphaNum .||. (== '_')
 
 locd :: Tokenizer a -> Tokenizer (Locd a)
 locd tok = do
