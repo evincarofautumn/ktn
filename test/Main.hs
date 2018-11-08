@@ -61,7 +61,8 @@ spec = do
         -- TODO: < > | \ - _ . \x2192 :
         let
           symbols =
-            "|]\x27E7->\x2192{{|}...\x2026()_\
+            -- Hmm...   (._. )
+            "|]\x27E7-> \x2192{{|}...\x2026()_\
             \:::[[|]\x2237''\\,#;\x2983|}\x2984"
 
         locdItem <$> testTokenize symbols
@@ -92,6 +93,70 @@ spec = do
           , UnboxedBegin Unicode
           , UnboxedEnd ASCII
           , UnboxedEnd Unicode
+          ]
+
+      it "parses alphabetic word names" $ do
+        locdItem <$> testTokenize "abc"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Postfix "abc"
+          ]
+
+      it "parses alphanumeric word names" $ do
+        locdItem <$> testTokenize "abc123"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Postfix "abc123"
+          ]
+
+      it "parses word names starting with underscore" $ do
+        locdItem <$> testTokenize "_abc123"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Postfix "_abc123"
+          ]
+
+      it "parses word names with underscores" $ do
+        locdItem <$> testTokenize "one_two_three"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Postfix "one_two_three"
+          ]
+
+      it "parses simple operator names" $ do
+        locdItem <$> testTokenize "+ - * /"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Infix "+"
+          , Word $ Unqual Infix "-"
+          , Word $ Unqual Infix "*"
+          , Word $ Unqual Infix "/"
+          ]
+
+      it "parses operator names overlapping with symbols" $ do
+        locdItem <$> testTokenize "|| .. \\/ /\\ .#. #.# ->* ||]"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Infix "||"
+          , Word $ Unqual Infix ".."
+          , Word $ Unqual Infix "\\/"
+          , Word $ Unqual Infix "/\\"
+          , Word $ Unqual Infix ".#."
+          , Word $ Unqual Infix "#.#"
+          , Word $ Unqual Infix "->*"
+          , Word $ Unqual Infix "||"
+          , ListEnd
+          ]
+
+      it "parses operators containing angle brackets" $ do
+        locdItem <$> testTokenize "< > << >> <= >= <=>"
+          `shouldBe` Right <$>
+          [ Word $ Unqual Infix "<"
+          , Word $ Unqual Infix ">"
+          , AngleBegin ASCII
+          , Word $ Unqual Infix "<"
+          , AngleEnd ASCII
+          , Word $ Unqual Infix ">"
+          , AngleBegin ASCII
+          , Word $ Unqual Infix "="
+          , AngleEnd ASCII
+          , Word $ Unqual Infix "="
+          , AngleBegin ASCII
+          , Word $ Unqual Infix "=>"
           ]
 
 testTokenize = tokenize (TextName "test") (Row 1)

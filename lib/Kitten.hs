@@ -20,18 +20,20 @@ module Kitten
   , Col(..)
   , Enc(..)
   , ErrMsg(..)
+  , Fixity(..)
   , Loc(..)
   , Locd(..)
   , Row(..)
   , SrcName(..)
   , Tok(..)
   , TokErr(..)
+  , Unqual(..)
   , type (+)
   , tokenize
   ) where
 
-import Control.Applicative (many, optional)
-import Data.Char (isAlphaNum)
+import Control.Applicative (many, optional, some)
+import Data.Char
 import Data.Foldable (asum)
 import Data.Functor.Identity (Identity)
 import Data.Ord (Down(..), comparing)
@@ -41,6 +43,7 @@ import Data.Vector (Vector)
 import Data.Void (Void)
 import GHC.Types (Type)
 import Text.Read (readMaybe)
+import qualified Data.Text as T
 import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
@@ -806,10 +809,8 @@ data Tok :: Brack -> Type where
 
   -- Identifiers
 
-  -- | Operator name.
-  Op :: !Unqual -> Tok b
   -- | Word name.
-  Word :: Tok b
+  Word :: !Unqual -> Tok b
 
   deriving (Eq, Show)
 
@@ -933,6 +934,10 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdsym' :: Text -> Tok b -> Tokenizer (Locd (e + Tok b))
     locdsym' sym tok = (Right tok <$) <$> locdsym sym
 
+    locdsymNot :: Tokenizer a -> Text -> Tok b -> Tokenizer (Locd (e + Tok b))
+    locdsymNot not sym tok = MP.try $ fmap (fmap (Right . const tok))
+      $ ML.lexeme silence $ locd $ MC.string sym <* MP.notFollowedBy (MP.try not)
+
     locdkwd :: Text -> Tokenizer (Locd Text)
     locdkwd = ML.lexeme silence . locd
       . (<* MP.notFollowedBy (MP.try wordChar)) . MC.string
@@ -943,23 +948,41 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     wordChar :: Tokenizer Char
     wordChar = MC.satisfy isWordChar
 
+    wordStart :: Tokenizer Char
+    wordStart = MC.satisfy isWordStart
+
+    operatorChar :: Tokenizer Char
+    operatorChar = MC.satisfy isOperatorChar
+
     tokens :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
     tokens = many token
 
+    word :: Tokenizer Text
+    word = T.cons <$> wordStart <*> (T.pack <$> many wordChar)
+
+    operator :: Tokenizer Text
+    operator = T.pack <$> some operatorChar
+
+    locdword :: Tokenizer (Locd Text)
+    locdword = ML.lexeme silence $ locd word
+
+    locdop :: Tokenizer (Locd Text)
+    locdop = ML.lexeme silence $ locd operator
+
     token :: Tokenizer (Locd (TokErr + Tok 'Unbrack))
     token = asum
-      -- TODO: operators containing <
-      [ locdsym' "<"      $ AngleBegin ASCII
+      [ locdsymNot operatorChar "<" $ Word $ Unqual Infix "<"
+      , locdsym' "<"      $ AngleBegin ASCII
       , locdsym' "\x27E8" $ AngleBegin Unicode
-      -- TODO: operators containing >
+      , locdsymNot operatorChar ">" $ Word $ Unqual Infix ">"
       , locdsym' ">"      $ AngleEnd ASCII
       , locdsym' "\x27E9" $ AngleEnd Unicode
       , locdsym' "\x27E6" $ ArrayBegin Unicode
       -- TODO: operators containing |
       , locdsym' "|]"     $ ArrayEnd ASCII
       , locdsym' "\x27E7" $ ArrayEnd Unicode
-      , locdsym' "->"     $ Arrow ASCII
-      , locdsym' "\x2192" $ Arrow Unicode
+      , locdsymNot operatorChar "->" $ Arrow ASCII
+      , locdsymNot operatorChar "\x2192" $ Arrow Unicode
       -- "{" and "{|"
       , do
         _ :@ brackLoc <- locd $ MC.string "{"
@@ -973,7 +996,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdsym' "\x2026" $ Ellipsis Unicode
       , locdsym' "("      GroupBegin
       , locdsym' ")"      GroupEnd
-      , locdsym' "_"      Ignore
+      , locdsymNot wordChar "_" Ignore
       -- ":" and "::"
       , do
         _ :@ firstLoc <- locd $ MC.string ":"
@@ -994,11 +1017,9 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdsym' "\x2237" $ Lookup Unicode
       -- TODO: character literals
       , locdsym' "''"     Quote
-      -- TODO: operators containing backslash?
-      , locdsym' "\\"     Ref
+      , locdsymNot operatorChar "\\" Ref
       , locdsym' ","      Seq
-      -- TODO: operators containing #
-      , locdsym' "#"      Splice
+      , locdsymNot operatorChar "#" Splice
       , locdsym' ";"      Term
       , locdsym' "\x2983" $ UnboxedBegin Unicode
       -- TODO: operators containing |
@@ -1028,6 +1049,9 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdkwd' "type"       KwdType
       , locdkwd' "vocab"      KwdVocab
       , locdkwd' "with"       KwdWith
+
+      , fmap (Right . Word . Unqual Infix) <$> locdop
+      , fmap (Right . Word . Unqual Postfix) <$> locdword
       ]
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
@@ -1065,6 +1089,13 @@ specialize frag = error $ "TODO: specialize " ++ show frag
 f .||. g = do
   x <- f
   if x then pure True else g
+infixr 2 .||.
+
+(.&&.) :: (Monad f) => f Bool -> f Bool -> f Bool
+f .&&. g = do
+  x <- f
+  if x then g else pure False
+infixr 3 .&&.
 
 floatLitVal :: Fractional a => FloatLit -> a
 floatLitVal (FloatLit sig frac ex _bits)
@@ -1075,8 +1106,55 @@ floatLitVal (FloatLit sig frac ex _bits)
       | delta < 0 = 1 % 10 ^ negate delta
       | otherwise = 10 ^ delta
 
+isOperatorChar :: Char -> Bool
+isOperatorChar = (isSymbol .||. isPunctuation) .&&. (`notElem` reservedSymChars)
+
+-- | List of symbol characters that cannot appear in an operator name.
+--
+-- Note that the following characters /are/ allowed in operators despite having
+-- special meaning as lexical symbols:
+--
+-- * @<@
+-- * @>@
+-- * @|@
+-- * @:@
+-- * U+2192 RIGHTWARDS ARROW
+-- * @.@
+-- * U+2026 HORIZONTAL ELLIPSIS
+-- * @\\@
+-- * @#@
+--
+reservedSymChars :: [Char]
+reservedSymChars =
+  [ '\x27E8' -- U+27E8 MATHEMATICAL LEFT ANGLE BRACKET
+  , '\x27E9' -- U+27E9 MATHEMATICAL RIGHT ANGLE BRACKET
+  , '\x27E6' -- U+27E6 MATHEMATICAL LEFT WHITE SQUARE BRACKET
+  , '\x27E7' -- U+27E7 MATHEMATICAL RIGHT WHITE SQUARE BRACKET
+  , '{'      -- U+007B LEFT CURLY BRACKET
+  , '}'      -- U+007D RIGHT CURLY BRACKET
+  , '('      -- U+0028 LEFT PARENTHESIS
+  , ')'      -- U+0029 RIGHT PARENTHESIS
+  , '_'      -- U+005F SPACING UNDERSCORE
+  , '['      -- U+005B LEFT SQUARE BRACKET
+  , ']'      -- U+005D RIGHT SQUARE BRACKET
+  , '\x2237' -- U+2237 PROPORTION
+  , '\''     -- U+0027 APOSTROPHE
+  , '"'      -- U+0022 QUOTATION MARK
+  , '\x201C' -- U+201C LEFT DOUBLE QUOTATION MARK
+  , '\x201D' -- U+201D RIGHT DOUBLE QUOTATION MARK
+  , '\x2018' -- U+2018 LEFT SINGLE QUOTATION MARK
+  , '\x2019' -- U+2019 RIGHT SINGLE QUOTATION MARK
+  , ','      -- U+002C COMMA
+  , ';'      -- U+003B SEMICOLON
+  , '\x2983' -- U+2983 LEFT WHITE CURLY BRACKET
+  , '\x2984' -- U+2984 RIGHT WHITE CURLY BRACKET
+  ]
+
 isWordChar :: Char -> Bool
-isWordChar = isAlphaNum .||. (== '_')
+isWordChar = isAlphaNum .||. isMark .||. (== '_')
+
+isWordStart :: Char -> Bool
+isWordStart = isAlpha .||. (== '_')
 
 locd :: Tokenizer a -> Tokenizer (Locd a)
 locd tok = do
