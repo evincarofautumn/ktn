@@ -32,13 +32,13 @@ main = Haskeline.runInputT Haskeline.defaultSettings loop
             Left e -> nop
             Right tokens' -> do
               let tokens'' = [tok :@ loc | Right tok :@ loc <- tokens']
-              bracketed :: SomeException + [Locd (Tok 'Brack)]
+              bracketed :: SomeException + [Locd (BrackErr + Tok 'Brack)]
                 <- liftIO $ try $ evaluate
                 $ bracket interactiveName tokens''
               case bracketed of
                 Left e -> nop
                 Right bracketed' -> do
-                  let bracketed'' = [tok | tok :@ _loc <- bracketed']
+                  let bracketed'' = [tok | Right tok :@ _loc <- bracketed']
                   Haskeline.outputStrLn $ unlines
                     $ (PP.render . pPrint) <$> bracketed''
           loop
