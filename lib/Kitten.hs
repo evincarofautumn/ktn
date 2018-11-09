@@ -2,9 +2,11 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -17,10 +19,12 @@
 
 module Kitten
   ( Brack(..)
+  , BrackErr(..)
   , Col(..)
   , Enc(..)
   , ErrMsg(..)
   , Fixity(..)
+  , Indented(..)
   , Loc(..)
   , Locd(..)
   , Row(..)
@@ -29,24 +33,34 @@ module Kitten
   , TokErr(..)
   , Unqual(..)
   , type (+)
+  , bracket
   , tokenize
   ) where
 
 import Control.Applicative (many, optional, some)
 import Data.Char
-import Data.Foldable (asum)
+import Data.Foldable (asum, toList)
+import Data.Function (on)
 import Data.Functor.Identity (Identity)
+import Data.List (foldl', groupBy)
+import Data.List.NonEmpty (NonEmpty(..))
+import Data.Map (Map)
 import Data.Ord (Down(..), comparing)
+import Data.Proxy (Proxy(..))
 import Data.Ratio ((%))
 import Data.Text (Text)
 import Data.Vector (Vector)
 import Data.Void (Void)
 import GHC.Types (Type)
+import Text.PrettyPrint.HughesPJClass (Pretty(..))
 import Text.Read (readMaybe)
+import qualified Data.Map as M
 import qualified Data.Text as T
 import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
+import qualified Text.Megaparsec.Error as ME
+import qualified Text.PrettyPrint as PP
 
 -- | The type of annotations in the given compiler phase.
 type family Anno (phase :: Phase) :: Type where
@@ -61,7 +75,7 @@ data Base :: Type where
   Oct :: Base
   Dec :: Base
   Hex :: Base
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | The boxity of a term that may be unboxed or boxed.
 data Box :: Type where
@@ -82,20 +96,23 @@ data BrackErr :: Type where
   BrackErr :: !(Locd Text) -> !ErrMsg -> BrackErr
   deriving (Show)
 
+-- | A bracket inserter.
+type Bracketer = MP.Parsec Void [Indented (Locd (Tok 'Unbrack))]
+
 -- | The contents of a character literal.
 data CharLit :: Type where
   CharLit :: !(Esc + Char) -> CharLit
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | A column in a source location.
 newtype Col = Col { colVal :: Int }
-  deriving (Eq, Ord, Show)
+  deriving (Enum, Eq, Ord, Show)
 
 -- | The encoding of a token with both ASCII and Unicode spellings.
 data Enc :: Type where
   ASCII :: Enc
   Unicode :: Enc
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | An error message.
 newtype ErrMsg = ErrMsg Text
@@ -201,19 +218,19 @@ data Esc :: Type where
   -- | @"@: U+0022 QUOTATION MARK
   Quot :: Esc
 
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | The lexical fixity of a word: 'Infix' for operators, 'Postfix' otherwise.
 data Fixity :: Type where
   Postfix :: Fixity
   Infix :: Fixity
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | The precision of a floating-point number.
 data FloatBits :: Type where
   F32 :: FloatBits
   F64 :: FloatBits
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | A floating-point literal of the form @FloatLit a b c bits@ denoting the
 -- floating-point number @a * 10 ^ (c - b)@ with precision of @bits@.
@@ -224,7 +241,7 @@ data FloatLit :: Type where
     , floatLitExp :: !Int
     , floatLitBits :: !FloatBits
     } -> FloatLit
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | A program fragment, comprising all the top-level program elements and terms
 -- parsed from a source fragment.
@@ -269,6 +286,19 @@ deriving instance
 newtype Ind = Ind Int
   deriving (Show)
 
+-- | A value decorated with an indent level.
+data Indented :: Type -> Type where
+  (:>) ::
+    { indentedItem :: a
+    , indentedLevel :: !Col
+    } -> Indented a
+  deriving (Eq, Functor, Ord, Show)
+
+infixl 6 :>
+
+instance (ME.ShowToken a) => ME.ShowToken (Indented a) where
+  showTokens = ME.showTokens . fmap indentedItem
+
 -- | An instance definition.
 data InstDef :: Phase -> Type where
   InstDef ::
@@ -289,7 +319,7 @@ data IntBits :: Type where
   U16 :: IntBits
   U32 :: IntBits
   U64 :: IntBits
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | An integer literal.
 data IntLit :: Type where
@@ -298,7 +328,7 @@ data IntLit :: Type where
     , intLitBase :: !Base
     , intLitBits :: !IntBits
     } -> IntLit
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | The kind of a type variable.
 data Kind :: Type where
@@ -368,9 +398,12 @@ data Locd :: Type -> Type where
     { locdItem :: a
     , locdLoc :: !Loc
     } -> Locd a
-  deriving (Eq, Functor, Show)
+  deriving (Eq, Functor, Ord, Show)
 
-infixl 5 :@
+infixl 7 :@
+
+instance (ME.ShowToken a) => ME.ShowToken (Locd a) where
+  showTokens = ME.showTokens . fmap locdItem
 
 -- | A definition of metadata.
 data MetaDef :: Phase -> Type where
@@ -387,7 +420,7 @@ type family Name (phase :: Phase) :: Type where
 -- | The contents of a paragraph literal.
 data ParaLit :: Type where
   ParaLit :: !(Vector (Vector (Esc + Text))) -> ParaLit
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | The definition of a permission.
 data PermDef :: Phase -> Type where
@@ -686,7 +719,7 @@ newtype TEVar = TEVar Var
 -- | The contents of a text literal.
 data TextLit :: Type where
   TextLit :: !(Vector (Esc + Text)) -> TextLit
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | A token, indexed by a 'Brack'eting that indicates whether it has been
 -- 'bracket'ed.
@@ -812,7 +845,75 @@ data Tok :: Brack -> Type where
   -- | Word name.
   Word :: !Unqual -> Tok b
 
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
+
+instance Pretty (Tok b) where
+  pPrint = \ case
+    KwdAbout -> "about"
+    KwdAs -> "as"
+    KwdCase -> "case"
+    KwdDefine -> "define"
+    KwdDo -> "do"
+    KwdElif -> "elif"
+    KwdElse -> "else"
+    KwdExport -> "export"
+    KwdIf -> "if"
+    KwdImport -> "import"
+    KwdInstance -> "instance"
+    KwdIntrinsic -> "intrinsic"
+    KwdJump -> "jump"
+    KwdMatch -> "match"
+    KwdLoop -> "loop"
+    KwdPermission -> "permission"
+    KwdReturn -> "return"
+    KwdSynonym -> "synonym"
+    KwdTrait -> "trait"
+    KwdType -> "type"
+    KwdVocab -> "vocab"
+    KwdWith -> "with"
+    AngleBegin ASCII -> "<"
+    AngleBegin Unicode -> "\x27E8"
+    AngleEnd ASCII -> ">"
+    AngleEnd Unicode -> "\x27E9"
+    ArrayBegin ASCII -> "[|"
+    ArrayBegin Unicode -> "\x27E6"
+    ArrayEnd ASCII -> "|]"
+    ArrayEnd Unicode -> "\x27E7"
+    Arrow ASCII -> "->"
+    Arrow Unicode -> "\x2192"
+    BlockBegin -> "{"
+    BlockEnd -> "}"
+    Ellipsis ASCII -> "..."
+    Ellipsis Unicode -> "\x2026"
+    GroupBegin -> "("
+    GroupEnd -> ")"
+    Ignore -> "_"
+    Layout -> ":"
+    ListBegin -> "["
+    ListEnd -> "]"
+    Lookup ASCII -> "::"
+    Lookup Unicode -> "\x2237"
+    Quote -> "''"
+    Ref -> "\\"
+    Seq -> ","
+    Splice -> "#"
+    Term -> ";"
+    UnboxedBegin ASCII -> "{|"
+    UnboxedBegin Unicode -> "\x2983"
+    UnboxedEnd ASCII -> "|}"
+    UnboxedEnd Unicode -> "\x2984"
+    Char ASCII lit -> PP.hcat ["'", "..." {- pPrint lit -}, "'"]
+    Char Unicode lit -> PP.hcat ["\x2018", "..." {- pPrint lit -}, "\x2019"]
+    Float lit -> "..." {- pPrint lit -}
+    Integer lit -> "..." {- pPrint lit -}
+    Para ASCII lit -> PP.vcat ["\"\"\"", "..." {- pPrint lit -}, "\"\"\""]
+    Para Unicode lit -> PP.vcat ["\x00B6", "..." {- pPrint lit -}, "\x00B6"]
+    Text ASCII lit -> PP.hcat ["\"", "..." {- pPrint lit -}, "\""]
+    Text Unicode lit -> PP.hcat ["\x201C", "..." {- pPrint lit -}, "\x201D"]
+    Word name -> pPrint name
+
+instance ME.ShowToken (Tok b) where
+  showTokens = PP.render . PP.hsep . fmap pPrint . toList
 
 -- | A character tokenizer.
 type Tokenizer = MP.Parsec Void Text
@@ -863,7 +964,10 @@ data TypeSyn :: Phase -> Type where
 -- 'Fixity' describing how the name was used.
 data Unqual :: Type where
   Unqual :: !Fixity -> !Text -> Unqual
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
+
+instance Pretty Unqual where
+  pPrint (Unqual _fixity name) = PP.text $ T.unpack name
 
 -- | An unresolved name.
 data Unres :: Type where
@@ -989,7 +1093,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         bar <- optional $ locd $ MC.string "|"
         _ <- silence
         pure $ Right <$> case bar of
-          Just (_ :@ barLoc) -> UnboxedBegin ASCII :@ brackLoc <> barLoc
+          Just (_ :@ barLoc) -> UnboxedBegin ASCII :@ (brackLoc <> barLoc)
           Nothing -> BlockBegin :@ brackLoc
       , locdsym' "}"      BlockEnd
       , locdsym' "..."    $ Ellipsis ASCII
@@ -1003,7 +1107,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         second <- optional $ locd $ MC.string ":"
         _ <- silence
         pure $ Right <$> case second of
-          Just (_ :@ secondLoc) -> Lookup ASCII :@ firstLoc <> secondLoc
+          Just (_ :@ secondLoc) -> Lookup ASCII :@ (firstLoc <> secondLoc)
           Nothing -> Layout :@ firstLoc
       -- "[" and "[|"
       , do
@@ -1011,7 +1115,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         bar <- optional $ locd $ MC.string "|"
         _ <- silence
         pure $ Right <$> case bar of
-          Just (_ :@ barLoc) -> ArrayBegin ASCII :@ brackLoc <> barLoc
+          Just (_ :@ barLoc) -> ArrayBegin ASCII :@ (brackLoc <> barLoc)
           Nothing -> ListBegin :@ brackLoc
       , locdsym' "]"      ListEnd
       , locdsym' "\x2237" $ Lookup Unicode
@@ -1055,9 +1159,215 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       ]
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
--- explicit brackets.
-bracket :: [Locd (Tok 'Unbrack)] -> [Locd (BrackErr + Tok 'Brack)]
-bracket tokens = error $ "TODO: bracket " ++ show tokens
+-- explicit brackets and terminators.
+--
+-- A layout block consists of a colon followed by one or more lines whose source
+-- column is greater than the indentation of the line containing the colon. Each
+-- line consists of one or more items whose source column is greater than that
+-- of the first item in the line. Each item is either a non-bracket token, or a
+-- series of items between bracket tokens.
+--
+-- Lines are desugared with terminators between them, and layout blocks are
+-- desugared with explicit block delimiters around them. For example:
+--
+-- > outer:
+-- >   inner1:
+-- >     line1 line1
+-- >       line1
+-- >     line2
+-- >       line2
+-- >       line2
+-- >   inner2:
+-- >     line3 line3
+-- >     line4
+-- >       line4
+--
+-- Becomes:
+--
+-- > outer{
+-- >   inner1{
+-- >     line1 line1
+-- >       line1;
+-- >     line2
+-- >       line2
+-- >       line2;};
+-- >   inner2{
+-- >     line3 line3;
+-- >     line4
+-- >       line4;};}
+--
+-- Note that if a block uses explicit braces, its contents are /not/ interpreted
+-- as folded lines, and no terminators will be inserted.
+--
+bracket :: SrcName -> [Locd (Tok 'Unbrack)] -> [Locd (Tok 'Brack)]
+bracket srcName tokens = case MP.runParser bracketer name indented of
+  Left err -> error $ concat
+    [ "internal bracketing error: "
+    , MP.parseErrorPretty err
+    ]
+  Right result -> result
+  where
+    indented = concat $ zipWith indentEach indents lines
+    indentEach indent line = (:> indent) <$> line
+    indents = locBeginCol . locdLoc . head <$> lines
+    lines = groupBy ((==) `on` locBeginRow . locdLoc) tokens
+
+    name :: String
+    name = show srcName
+
+    bracketer :: Bracketer [Locd (Tok 'Brack)]
+    bracketer = concat <$> many item <* MP.eof
+
+    item :: Bracketer [Locd (Tok 'Brack)]
+    item = itemWhere $ const True
+
+    itemWhere
+      :: (Indented (Locd (Tok 'Unbrack)) -> Bool)
+      -> Bracketer [Locd (Tok 'Brack)]
+    itemWhere p = MP.try (MP.lookAhead (MC.satisfy p)) *> asum
+      [ between (ArrayBegin ASCII) (ArrayEnd ASCII)
+      , between (ArrayBegin Unicode) (ArrayEnd Unicode)
+      , between (UnboxedBegin ASCII) (UnboxedEnd ASCII)
+      , between (UnboxedBegin Unicode) (UnboxedEnd Unicode)
+      , between BlockBegin BlockEnd
+      , between GroupBegin GroupEnd
+      , between ListBegin ListEnd
+      , layout
+      , pure <$> (fromUnbrack . indentedItem =<< MC.satisfy nonbracket)
+      ]
+
+    between :: Tok 'Unbrack -> Tok 'Unbrack -> Bracketer [Locd (Tok 'Brack)]
+    between open close = do
+      begin <- fromUnbrack . indentedItem =<< MC.satisfy ((== open) . locdItem . indentedItem)
+      inner <- concat <$> many item
+      end <- fromUnbrack . indentedItem =<< MC.satisfy ((== close) . locdItem . indentedItem)
+      pure (begin : inner ++ [end])
+
+    fromUnbrack :: Locd (Tok 'Unbrack) -> Bracketer (Locd (Tok 'Brack))
+    fromUnbrack (tok :@ loc) = (:@ loc) <$> case tok of
+      KwdAbout -> pure KwdAbout
+      KwdAs -> pure KwdAs
+      KwdCase -> pure KwdCase
+      KwdDefine -> pure KwdDefine
+      KwdDo -> pure KwdDo
+      KwdElif -> pure KwdElif
+      KwdElse -> pure KwdElse
+      KwdExport -> pure KwdExport
+      KwdIf -> pure KwdIf
+      KwdImport -> pure KwdImport
+      KwdInstance -> pure KwdInstance
+      KwdIntrinsic -> pure KwdIntrinsic
+      KwdJump -> pure KwdJump
+      KwdMatch -> pure KwdMatch
+      KwdLoop -> pure KwdLoop
+      KwdPermission -> pure KwdPermission
+      KwdReturn -> pure KwdReturn
+      KwdSynonym -> pure KwdSynonym
+      KwdTrait -> pure KwdTrait
+      KwdType -> pure KwdType
+      KwdVocab -> pure KwdVocab
+      KwdWith -> pure KwdWith
+      AngleBegin enc -> pure $ AngleBegin enc
+      AngleEnd enc -> pure $ AngleEnd enc
+      ArrayBegin enc -> pure $ ArrayBegin enc
+      ArrayEnd enc -> pure $ ArrayEnd enc
+      Arrow enc -> pure $ Arrow enc
+      BlockBegin -> pure BlockBegin
+      BlockEnd -> pure BlockEnd
+      Ellipsis enc -> pure $ Ellipsis enc
+      GroupBegin -> pure $ GroupBegin
+      GroupEnd -> pure GroupEnd
+      Ignore -> pure Ignore
+      Layout -> MP.unexpected $ MP.Label ('c':|"olon not beginning valid layout block")
+      ListBegin -> pure ListBegin
+      ListEnd -> pure ListEnd
+      Lookup enc -> pure $ Lookup enc
+      Quote -> pure Quote
+      Ref -> pure Ref
+      Seq -> pure Seq
+      Splice -> pure Splice
+      Term -> pure Term
+      UnboxedBegin enc -> pure $ UnboxedBegin enc
+      UnboxedEnd enc -> pure $ UnboxedEnd enc
+      Char enc lit -> pure $ Char enc lit
+      Float lit -> pure $ Float lit
+      Integer lit -> pure $ Integer lit
+      Para enc lit -> pure $ Para enc lit
+      Text enc lit -> pure $ Text enc lit
+      Word name -> pure $ Word name
+
+    nonbracket :: Indented (Locd (Tok 'Unbrack)) -> Bool
+    nonbracket = not . (`elem` bracks') . locdItem . indentedItem
+
+    bracks' :: [Tok 'Unbrack]
+    bracks' = uncurry (++) $ unzip $ M.toList bracks
+
+    bracks :: Map (Tok 'Unbrack) (Tok 'Unbrack)
+    bracks = M.fromList
+      [ (ArrayBegin ASCII, ArrayEnd ASCII)
+      , (ArrayBegin Unicode, ArrayEnd Unicode)
+      , (BlockBegin, BlockEnd)
+      , (GroupBegin, GroupEnd)
+      , (ListBegin, ListEnd)
+      , (UnboxedBegin ASCII, UnboxedEnd ASCII)
+      , (UnboxedBegin Unicode, UnboxedEnd Unicode)
+      ]
+
+    layout :: Bracketer [Locd (Tok 'Brack)]
+    layout = do
+      colon@((_ :@ colonLoc) :> colonIndent) <- MC.satisfy
+        $ (== Layout) . locdItem . indentedItem
+      body <- some $ layoutLine colonIndent
+      let
+        -- Calculate the source location just past the end of the last token in 
+        pastEnd toks = let
+          lastLoc = locdLoc $ last $ last body
+          in lastLoc
+            { locBeginCol = locEndCol lastLoc
+            , locEndCol = succ $ locEndCol lastLoc
+            }
+        endLoc = pastEnd $ concat body
+        body' = concat $ (\ line -> let
+          termLoc = pastEnd line
+          in line ++ [Term :@ termLoc]) <$> body
+      pure $ BlockBegin :@ colonLoc : body' ++ [BlockEnd :@ endLoc]
+
+    layoutLine :: Col -> Bracketer [Locd (Tok 'Brack)]
+    layoutLine colonIndent = do
+      (first@(_ :@ firstLoc) :> _) <- MC.satisfy
+        $ (> colonIndent) . locBeginCol . locdLoc . indentedItem
+      rest <- fmap concat $ many $ itemWhere
+        $ (> locBeginCol firstLoc) . locBeginCol . locdLoc . indentedItem
+      first' <- fromUnbrack first
+      pure $ first' : rest
+
+instance MP.Stream [Indented (Locd (Tok 'Unbrack))] where
+  type Token [Indented (Locd (Tok 'Unbrack))] = Indented (Locd (Tok 'Unbrack))
+  type Tokens [Indented (Locd (Tok 'Unbrack))] = [Indented (Locd (Tok 'Unbrack))]
+  tokenToChunk Proxy = pure
+  tokensToChunk Proxy = id
+  chunkToTokens Proxy = id
+  chunkLength Proxy = length
+  chunkEmpty Proxy = null
+  advance1 Proxy = advanceBrack
+  advanceN Proxy w = foldl' (advanceBrack w)
+  take1_ [] = Nothing
+  take1_ (t:ts) = Just (t, ts)
+  takeN_ n s
+    | n <= 0 = Just ([], s)
+    | null s = Nothing
+    | otherwise = Just $ splitAt n s
+  takeWhile_ = span
+
+advanceBrack
+  :: MP.Pos
+  -> MP.SourcePos
+  -> Indented (Locd (Tok 'Unbrack))
+  -> MP.SourcePos
+advanceBrack _tabWidth (MP.SourcePos name _row _col) (_ :@ loc :> _)
+  = MP.SourcePos name
+    (MP.mkPos $ rowVal $ locBeginRow loc)
+    (MP.mkPos $ colVal $ locBeginCol loc)
 
 -- | Parse a stream of bracketed tokens into a program fragment.
 parse :: [Locd (Tok 'Brack)] -> Frag [] 'Parsed
@@ -1148,6 +1458,7 @@ reservedSymChars =
   , ';'      -- U+003B SEMICOLON
   , '\x2983' -- U+2983 LEFT WHITE CURLY BRACKET
   , '\x2984' -- U+2984 RIGHT WHITE CURLY BRACKET
+  , '\x00B6' -- U+00B6 PILCROW SIGN
   ]
 
 isWordChar :: Char -> Bool

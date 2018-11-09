@@ -159,4 +159,125 @@ spec = do
           , Word $ Unqual Infix "=>"
           ]
 
-testTokenize = tokenize (TextName "test") (Row 1)
+  describe "layout" $ do
+
+    it "desugars basic layout" $ do
+      locdItem <$> testLayout
+        "header:\n\
+        \  contents\n\
+        \\&"
+        `shouldBe`
+        [ Word $ Unqual Postfix "header"
+        , BlockBegin
+        , Word $ Unqual Postfix "contents"
+        , Term
+        , BlockEnd
+        ]
+
+    it "desugars nested layout" $ do
+      locdItem <$> testLayout
+        "outer:\n\
+        \  inner1:\n\
+        \    contents\n\
+        \  inner2:\n\
+        \    contents\n\
+        \\&"
+        `shouldBe`
+        [ Word $ Unqual Postfix "outer"
+        , BlockBegin
+        , Word $ Unqual Postfix "inner1"
+        , BlockBegin
+        , Word $ Unqual Postfix "contents"
+        , Term
+        , BlockEnd
+        , Term
+        , Word $ Unqual Postfix "inner2"
+        , BlockBegin
+        , Word $ Unqual Postfix "contents"
+        , Term
+        , BlockEnd
+        , Term
+        , BlockEnd
+        ]
+
+    it "desugars layout with folded lines" $ do
+      locdItem <$> testLayout
+        "header:\n\
+        \  line1 line1 line1\n\
+        \  line2 line2\n\
+        \    line2 line2 line2\n\
+        \  line3 line3\n\
+        \    line3\n\
+        \    line3\n\
+        \    line3\n\
+        \\&"
+        `shouldBe`
+        [ Word (Unqual Postfix "header")
+        , BlockBegin
+        , Word (Unqual Postfix "line1")
+        , Word (Unqual Postfix "line1")
+        , Word (Unqual Postfix "line1")
+        , Term
+        , Word (Unqual Postfix "line2")
+        , Word (Unqual Postfix "line2")
+        , Word (Unqual Postfix "line2")
+        , Word (Unqual Postfix "line2")
+        , Word (Unqual Postfix "line2")
+        , Term
+        , Word (Unqual Postfix "line3")
+        , Word (Unqual Postfix "line3")
+        , Word (Unqual Postfix "line3")
+        , Word (Unqual Postfix "line3")
+        , Word (Unqual Postfix "line3")
+        , Term
+        , BlockEnd
+        ]
+
+    it "desugars nested layout with folded lines" $ do
+      locdItem <$> testLayout
+        "outer:\n\
+        \  inner1:\n\
+        \    line1 line1\n\
+        \      line1\n\
+        \    line2\n\
+        \      line2\n\
+        \      line2\n\
+        \  inner2:\n\
+        \    line3 line3\n\
+        \    line4\n\
+        \      line4\n\
+        \\&"
+        `shouldBe`
+        [ Word $ Unqual Postfix "outer"
+        , BlockBegin
+        , Word $ Unqual Postfix "inner1"
+        , BlockBegin
+        , Word $ Unqual Postfix "line1"
+        , Word $ Unqual Postfix "line1"
+        , Word $ Unqual Postfix "line1"
+        , Term
+        , Word $ Unqual Postfix "line2"
+        , Word $ Unqual Postfix "line2"
+        , Word $ Unqual Postfix "line2"
+        , Term
+        , BlockEnd
+        , Term
+        , Word $ Unqual Postfix "inner2"
+        , BlockBegin
+        , Word $ Unqual Postfix "line3"
+        , Word $ Unqual Postfix "line3"
+        , Term
+        , Word $ Unqual Postfix "line4"
+        , Word $ Unqual Postfix "line4"
+        , Term
+        , BlockEnd
+        , Term
+        , BlockEnd
+        ]
+
+testTokenize = tokenize testName (Row 1)
+
+testName = TextName "test"
+
+testLayout input = bracket testName
+  [tok :@ loc | Right tok :@ loc <- testTokenize input]
