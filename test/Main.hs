@@ -304,9 +304,17 @@ spec = do
         , Right BlockEnd
         ]
 
+  describe "parsing" $ do
+
+    it "parses empty fragment from empty input" $ do
+      testParse "" `shouldBe` emptyFrag
+
 testTokenize = tokenize testName (Row 1)
 
 testName = TextName "test"
 
 testLayout input = bracket testName
   [tok :@ loc | Right tok :@ loc <- testTokenize input]
+
+testParse input = parse testName
+  [tok :@ loc | Right tok :@ loc <- testLayout input]

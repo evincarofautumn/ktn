@@ -34,10 +34,12 @@ module Kitten
   , Unqual(..)
   , type (+)
   , bracket
+  , emptyFrag
+  , parse
   , tokenize
   ) where
 
-import Control.Applicative (many, optional, some)
+import Control.Applicative (Alternative, empty, many, optional, some)
 import Control.Monad (join)
 import Data.Char
 import Data.Foldable (asum, toList)
@@ -83,7 +85,7 @@ data Base :: Type where
 data Box :: Type where
   Unbox :: Box
   Box :: Box
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | Bracketing of a token: whether it may be a layout token. After bracketing,
 -- a stream of tokens of type @[Tok 'Brack]@ contains matched brackets instead
@@ -263,6 +265,23 @@ data Frag (container :: Type -> Type) (phase :: Phase) :: Type where
     , fragWords :: !(f (WordDef p))
     } -> Frag f p
 
+-- TODO: instance (forall a. Monoid (f a)) => Monoid Frag?
+emptyFrag :: (Alternative f) => Frag f p
+emptyFrag = Frag
+  { fragInsts = empty
+  , fragMetas = empty
+  , fragPermSyns = empty
+  , fragPerms = empty
+  , fragTerms = empty
+  , fragTraitSyns = empty
+  , fragTraits = empty
+  , fragTypeSyns = empty
+  , fragTypes = empty
+  , fragVocabSyns = empty
+  , fragWordSyns = empty
+  , fragWords = empty
+  }
+
 -- TODO: Use QuantifiedConstraints once Intero supports GHC 8.6.1
 deriving instance
 #if __GLASGOW_HASKELL__ >= 806
@@ -283,6 +302,26 @@ deriving instance
   )
 #endif
   => Show (Frag f p)
+
+deriving instance
+#if __GLASGOW_HASKELL__ >= 806
+  (forall a. Eq (f a))
+#else
+  ( Eq (f (InstDef p))
+  , Eq (f (MetaDef p))
+  , Eq (f (PermSyn p))
+  , Eq (f (PermDef p))
+  , Eq (f (Term p))
+  , Eq (f (TraitSyn p))
+  , Eq (f (TraitDef p))
+  , Eq (f (TypeSyn p))
+  , Eq (f (TypeDef p))
+  , Eq (f (VocabSyn p))
+  , Eq (f (WordSyn p))
+  , Eq (f (WordDef p))
+  )
+#endif
+  => Eq (Frag f p)
 
 -- | The de Bruijn index of a local variable.
 newtype Ind = Ind Int
@@ -309,6 +348,7 @@ data InstDef :: Phase -> Type where
     , instBody :: !(Maybe (Term p))
     } -> InstDef p
 
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (InstDef p)
 deriving instance (Show (Anno p), Show (Name p)) => Show (InstDef p)
 
 -- | The precision and range of an integer.
@@ -340,7 +380,7 @@ data Kind :: Type where
   PermKind :: Kind
   FunKind :: !Kind -> !Kind -> Kind
   TypeKind :: !(Qual 'Abs) -> Kind
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A source location, spanning between two (row, column) pairs in the same
 -- source.
@@ -410,7 +450,7 @@ instance (ME.ShowToken a) => ME.ShowToken (Locd a) where
 -- | A definition of metadata.
 data MetaDef :: Phase -> Type where
   MetaDef :: MetaDef p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The type of names in the given compiler phase.
 type family Name (phase :: Phase) :: Type where
@@ -424,15 +464,18 @@ data ParaLit :: Type where
   ParaLit :: !(Vector (Vector (Esc + Text))) -> ParaLit
   deriving (Eq, Ord, Show)
 
+-- | A token parser.
+type Parser = MP.Parsec Void [Locd (Tok 'Brack)]
+
 -- | The definition of a permission.
 data PermDef :: Phase -> Type where
   PermDef :: PermDef p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The definition of a permission synonym.
 data PermSyn :: Phase -> Type where
   PermSyn :: PermSyn p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The compiler phase, which determines the representation of 'Term's.
 data Phase :: Type where
@@ -446,7 +489,7 @@ data Phase :: Type where
 -- | A qualified name with the given vocab root.
 data Qual :: Root -> Type where
   Qual :: !(Vocab r) -> !Unqual -> Qual r
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A resolved name.
 data Res :: Type where
@@ -489,6 +532,7 @@ data Sig :: Phase -> Type where
     -> Sig p
     -> Sig p
 
+deriving instance (Eq (Name p)) => Eq (Sig p)
 deriving instance (Show (Name p)) => Show (Sig p)
 
 -- | The name of a source of code.
@@ -712,6 +756,7 @@ data Term :: Phase -> Type where
     -> !(Term p + Term p)
     -> Term p
 
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Term p)
 deriving instance (Show (Anno p), Show (Name p)) => Show (Term p)
 
 -- | An existential type variable in a type.
@@ -928,12 +973,12 @@ data TokErr :: Type where
 -- | The definition of a trait.
 data TraitDef :: Phase -> Type where
   TraitDef :: TraitDef p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The definition of a trait synonym.
 data TraitSyn :: Phase -> Type where
   TraitSyn :: TraitSyn p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A type variable in a type.
 newtype TVar = TVar Var
@@ -953,12 +998,12 @@ data Ty :: Type where
 -- | The definition of a type.
 data TypeDef :: Phase -> Type where
   TypeDef :: TypeDef p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | The definition of a type synonym.
 data TypeSyn :: Phase -> Type where
   TypeSyn :: TypeSyn p
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | An unqualified name. The 'Fixity' indicates whether it's a word name
 -- ('Postfix') or operator name ('Infix'). Note that this doesn't reflect how
@@ -976,31 +1021,32 @@ data Unres :: Type where
   UnresUnqual :: Unqual -> Unres
   UnresQualRel :: Qual 'Rel -> Unres
   UnresQualAbs :: Qual 'Abs -> Unres
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A variable in a quantifier in a type signature.
 data Var :: Type where
   Var :: !Unqual -> !Kind -> Var
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | A vocab qualifier.
 data Vocab :: Root -> Type where
   VocabAbs :: !(Vector Unqual) -> Vocab 'Abs
   VocabRel :: !(Vector Unqual) -> Vocab 'Rel
 
+deriving instance Eq (Vocab r)
 deriving instance Show (Vocab r)
 
 data VocabSyn :: Phase -> Type where
   VocabSyn :: VocabSyn p
-  deriving (Show)
+  deriving (Eq, Show)
 
 data WordDef :: Phase -> Type where
   WordDef :: WordDef p
-  deriving (Show)
+  deriving (Eq, Show)
 
 data WordSyn :: Phase -> Type where
   WordSyn :: WordSyn p
-  deriving (Show)
+  deriving (Eq, Show)
 
 type a + b = Either a b
 infixl 6 +
@@ -1377,9 +1423,48 @@ advanceBrack _tabWidth (MP.SourcePos name _row _col) (_ :@ loc :> _)
     (MP.mkPos $ rowVal $ locBeginRow loc)
     (MP.mkPos $ colVal $ locBeginCol loc)
 
+instance MP.Stream [Locd (Tok 'Brack)] where
+  type Token [Locd (Tok 'Brack)] = Locd (Tok 'Brack)
+  type Tokens [Locd (Tok 'Brack)] = [Locd (Tok 'Brack)]
+  tokenToChunk Proxy = pure
+  tokensToChunk Proxy = id
+  chunkToTokens Proxy = id
+  chunkLength Proxy = length
+  chunkEmpty Proxy = null
+  advance1 Proxy = advanceParser
+  advanceN Proxy w = foldl' (advanceParser w)
+  take1_ [] = Nothing
+  take1_ (t:ts) = Just (t, ts)
+  takeN_ n s
+    | n <= 0 = Just ([], s)
+    | null s = Nothing
+    | otherwise = Just $ splitAt n s
+  takeWhile_ = span
+
+advanceParser
+  :: MP.Pos
+  -> MP.SourcePos
+  -> Locd (Tok 'Brack)
+  -> MP.SourcePos
+advanceParser _tabWidth (MP.SourcePos name _row _col) (_ :@ loc)
+  = MP.SourcePos name
+    (MP.mkPos $ rowVal $ locBeginRow loc)
+    (MP.mkPos $ colVal $ locBeginCol loc)
+
 -- | Parse a stream of bracketed tokens into a program fragment.
-parse :: [Locd (Tok 'Brack)] -> Frag [] 'Parsed
-parse tokens = error $ "TODO: parse " ++ show tokens
+parse :: SrcName -> [Locd (Tok 'Brack)] -> Frag [] 'Parsed
+parse srcName tokens = case MP.runParser parser name tokens of
+  Left err -> error $ concat
+    [ "internal parsing error: "
+    , MP.parseErrorPretty err
+    ]
+  Right result -> result
+  where
+    name :: String
+    name = show srcName
+
+    parser :: Parser (Frag [] 'Parsed)
+    parser = pure emptyFrag
 
 -- | Replace unresolved names with resolved names throughout a fragment.
 rename :: Frag Vector 'Parsed -> Frag Vector 'Renamed
