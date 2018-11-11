@@ -58,3 +58,4 @@ tests:
     - HUnit
     - hspec
     - ktn
+    - text

@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -8,14 +7,13 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-
-#if __GLASGOW_HASKELL__ >= 806
-{-# LANGUAGE QuantifiedConstraints #-}
-#endif
 
 module Kitten
   ( Brack(..)
@@ -24,9 +22,11 @@ module Kitten
   , Enc(..)
   , ErrMsg(..)
   , Fixity(..)
+  , Frag(..)
   , Indented(..)
   , Loc(..)
   , Locd(..)
+  , Phase(..)
   , Row(..)
   , SrcName(..)
   , Tok(..)
@@ -282,45 +282,12 @@ emptyFrag = Frag
   , fragWords = empty
   }
 
--- TODO: Use QuantifiedConstraints once Intero supports GHC 8.6.1
 deriving instance
-#if __GLASGOW_HASKELL__ >= 806
-  (forall a. Show (f a))
-#else
-  ( Show (f (InstDef p))
-  , Show (f (MetaDef p))
-  , Show (f (PermSyn p))
-  , Show (f (PermDef p))
-  , Show (f (Term p))
-  , Show (f (TraitSyn p))
-  , Show (f (TraitDef p))
-  , Show (f (TypeSyn p))
-  , Show (f (TypeDef p))
-  , Show (f (VocabSyn p))
-  , Show (f (WordSyn p))
-  , Show (f (WordDef p))
-  )
-#endif
+  (Show (Anno p), Show (Name p), forall a. Show a => Show (f a))
   => Show (Frag f p)
 
 deriving instance
-#if __GLASGOW_HASKELL__ >= 806
-  (forall a. Eq (f a))
-#else
-  ( Eq (f (InstDef p))
-  , Eq (f (MetaDef p))
-  , Eq (f (PermSyn p))
-  , Eq (f (PermDef p))
-  , Eq (f (Term p))
-  , Eq (f (TraitSyn p))
-  , Eq (f (TraitDef p))
-  , Eq (f (TypeSyn p))
-  , Eq (f (TypeDef p))
-  , Eq (f (VocabSyn p))
-  , Eq (f (WordSyn p))
-  , Eq (f (WordDef p))
-  )
-#endif
+  (Eq (Anno p), Eq (Name p), forall a. Eq a => Eq (f a))
   => Eq (Frag f p)
 
 -- | The de Bruijn index of a local variable.
@@ -337,8 +304,8 @@ data Indented :: Type -> Type where
 
 infixl 6 :>
 
-instance (ME.ShowToken a) => ME.ShowToken (Indented a) where
-  showTokens = ME.showTokens . fmap indentedItem
+instance (Pretty a) => Pretty (Indented a) where
+  pPrint = pPrint . indentedItem
 
 -- | An instance definition.
 data InstDef :: Phase -> Type where
@@ -444,8 +411,8 @@ data Locd :: Type -> Type where
 
 infixl 7 :@
 
-instance (ME.ShowToken a) => ME.ShowToken (Locd a) where
-  showTokens = ME.showTokens . fmap locdItem
+instance (Pretty a) => Pretty (Locd a) where
+  pPrint = pPrint . locdItem
 
 -- | A definition of metadata.
 data MetaDef :: Phase -> Type where
@@ -959,9 +926,6 @@ instance Pretty (Tok b) where
     Text Unicode lit -> PP.hcat ["\x201C", "..." {- pPrint lit -}, "\x201D"]
     Word name -> pPrint name
 
-instance ME.ShowToken (Tok b) where
-  showTokens = PP.render . PP.hsep . fmap pPrint . toList
-
 -- | A character tokenizer.
 type Tokenizer = MP.Parsec Void Text
 
@@ -1057,7 +1021,7 @@ tokenize :: SrcName -> Row -> Text -> [Locd (TokErr + Tok 'Unbrack)]
 tokenize srcName row input = case MP.runParser tokenizer name input of
   Left err -> error $ concat
     [ "internal tokenizer error: "
-    , MP.parseErrorPretty err
+    , MP.errorBundlePretty err
     ]
   Right result -> result
   where
@@ -1069,7 +1033,9 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
 
     tokenizer :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
     tokenizer = do
-      MP.setPosition (MP.SourcePos name firstLine MP.pos1)
+      -- TODO: Postprocess tokens to adjust line number since 'setPosition' has
+      -- been removed in megaparsec 7.
+      -- MP.setPosition (MP.SourcePos name firstLine MP.pos1)
       file
 
     file :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
@@ -1098,13 +1064,13 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdkwd' kwd tok = (Right tok <$) <$> locdkwd kwd
 
     wordChar :: Tokenizer Char
-    wordChar = MC.satisfy isWordChar
+    wordChar = MP.satisfy isWordChar
 
     wordStart :: Tokenizer Char
-    wordStart = MC.satisfy isWordStart
+    wordStart = MP.satisfy isWordStart
 
     operatorChar :: Tokenizer Char
-    operatorChar = MC.satisfy isOperatorChar
+    operatorChar = MP.satisfy isOperatorChar
 
     tokens :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
     tokens = many token
@@ -1251,7 +1217,7 @@ bracket :: SrcName -> [Locd (Tok 'Unbrack)] -> [Locd (BrackErr + Tok 'Brack)]
 bracket srcName tokens = case MP.runParser bracketer name indented of
   Left err -> error $ concat
     [ "internal bracketing error: "
-    , MP.parseErrorPretty err
+    , MP.errorBundlePretty err
     ]
   Right result -> result
   where
@@ -1272,7 +1238,7 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
     itemWhere
       :: (Indented (Locd (Tok 'Unbrack)) -> Bool)
       -> Bracketer [Locd (BrackErr + Tok 'Brack)]
-    itemWhere p = MP.try (MP.lookAhead (MC.satisfy p)) *> asum
+    itemWhere p = MP.try (MP.lookAhead (MP.satisfy p)) *> asum
       [ between (ArrayBegin ASCII) (ArrayEnd ASCII)
       , between (ArrayBegin Unicode) (ArrayEnd Unicode)
       , between (UnboxedBegin ASCII) (UnboxedEnd ASCII)
@@ -1281,18 +1247,18 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
       , between GroupBegin GroupEnd
       , between ListBegin ListEnd
       , MP.try layout
-      , pure <$> (fromUnbrack . indentedItem =<< MC.satisfy nonbracket)
+      , pure <$> (fromUnbrack . indentedItem =<< MP.satisfy nonbracket)
       , do
-        loc <- join locRange <$> MP.getPosition
+        loc <- join locRange <$> MP.getSourcePos
         pure $ pure $ (:@ loc)
           $ Left $ BrackErr ("" :@ loc) "empty layout block"
       ]
 
     between :: Tok 'Unbrack -> Tok 'Unbrack -> Bracketer [Locd (BrackErr + Tok 'Brack)]
     between open close = do
-      begin <- fromUnbrack . indentedItem =<< MC.satisfy ((== open) . locdItem . indentedItem)
+      begin <- fromUnbrack . indentedItem =<< MP.satisfy ((== open) . locdItem . indentedItem)
       inner <- concat <$> many item
-      end <- fromUnbrack . indentedItem =<< MC.satisfy ((== close) . locdItem . indentedItem)
+      end <- fromUnbrack . indentedItem =<< MP.satisfy ((== close) . locdItem . indentedItem)
       pure (begin : inner ++ [end])
 
     fromUnbrack :: Locd (Tok 'Unbrack) -> Bracketer (Locd (BrackErr + Tok 'Brack))
@@ -1369,7 +1335,7 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
 
     layout :: Bracketer [Locd (BrackErr + Tok 'Brack)]
     layout = do
-      colon@((_ :@ colonLoc) :> colonIndent) <- MC.satisfy
+      colon@((_ :@ colonLoc) :> colonIndent) <- MP.satisfy
         $ (== Layout) . locdItem . indentedItem
       body <- some $ layoutLine colonIndent
       let
@@ -1388,7 +1354,7 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
 
     layoutLine :: Col -> Bracketer [Locd (BrackErr + Tok 'Brack)]
     layoutLine colonIndent = do
-      (first@(_ :@ firstLoc) :> _) <- MC.satisfy
+      (first@(_ :@ firstLoc) :> _) <- MP.satisfy
         $ (> colonIndent) . locBeginCol . locdLoc . indentedItem
       rest <- fmap concat $ many $ itemWhere
         $ (> locBeginCol firstLoc) . locBeginCol . locdLoc . indentedItem
@@ -1403,8 +1369,6 @@ instance MP.Stream [Indented (Locd (Tok 'Unbrack))] where
   chunkToTokens Proxy = id
   chunkLength Proxy = length
   chunkEmpty Proxy = null
-  advance1 Proxy = advanceBrack
-  advanceN Proxy w = foldl' (advanceBrack w)
   take1_ [] = Nothing
   take1_ (t:ts) = Just (t, ts)
   takeN_ n s
@@ -1412,16 +1376,9 @@ instance MP.Stream [Indented (Locd (Tok 'Unbrack))] where
     | null s = Nothing
     | otherwise = Just $ splitAt n s
   takeWhile_ = span
-
-advanceBrack
-  :: MP.Pos
-  -> MP.SourcePos
-  -> Indented (Locd (Tok 'Unbrack))
-  -> MP.SourcePos
-advanceBrack _tabWidth (MP.SourcePos name _row _col) (_ :@ loc :> _)
-  = MP.SourcePos name
-    (MP.mkPos $ rowVal $ locBeginRow loc)
-    (MP.mkPos $ colVal $ locBeginCol loc)
+  showTokens Proxy = PP.render . PP.hsep
+    . fmap (pPrint . locdItem . indentedItem) . toList
+  reachOffset = reachOffset' (locdLoc . indentedItem) splitAt foldl'
 
 instance MP.Stream [Locd (Tok 'Brack)] where
   type Token [Locd (Tok 'Brack)] = Locd (Tok 'Brack)
@@ -1431,8 +1388,6 @@ instance MP.Stream [Locd (Tok 'Brack)] where
   chunkToTokens Proxy = id
   chunkLength Proxy = length
   chunkEmpty Proxy = null
-  advance1 Proxy = advanceParser
-  advanceN Proxy w = foldl' (advanceParser w)
   take1_ [] = Nothing
   take1_ (t:ts) = Just (t, ts)
   takeN_ n s
@@ -1440,6 +1395,45 @@ instance MP.Stream [Locd (Tok 'Brack)] where
     | null s = Nothing
     | otherwise = Just $ splitAt n s
   takeWhile_ = span
+  showTokens Proxy = PP.render . PP.hsep
+    . fmap (pPrint . locdItem) . toList
+  reachOffset = reachOffset' locdLoc splitAt foldl'
+
+reachOffset'
+  :: forall s a
+  . (MP.Stream s, Show (MP.Tokens s), Pretty (MP.Token s))
+  => (MP.Token s -> Loc)
+  -> (Int -> s -> (MP.Tokens s, s))
+  -> (forall b. (b -> MP.Token s -> b) -> b -> MP.Tokens s -> b)
+  -> Int
+  -> MP.PosState s
+  -> (MP.SourcePos, String, MP.PosState s)
+reachOffset' locOf splitAt' foldl'' o state =
+  ( spos
+  , case addPrefix . f $ takeSameLine post of
+    "" -> "<empty line>"
+    xs -> xs
+  , MP.PosState
+    { MP.pstateInput = post
+    , MP.pstateOffset = MP.pstateOffset state `max` o
+    , MP.pstateSourcePos = spos
+    , MP.pstateTabWidth = MP.pstateTabWidth state
+    , MP.pstateLinePrefix = (if sameLine then (MP.pstateLinePrefix state ++) else id) (f "")
+    }
+  )
+  where
+    takeSameLine :: s -> String
+    takeSameLine s
+      | Just (x, xs) <- MP.take1_ s
+      = show $ fst $ MP.takeWhile_ ((== locBeginRow (locOf x)) . locBeginRow . locOf) s
+      | otherwise = ""
+
+    addPrefix xs = if sameLine then MP.pstateLinePrefix state ++ xs else xs
+    sameLine = MP.sourceLine spos == MP.sourceLine (MP.pstateSourcePos state)
+    (pre, post) = splitAt' (o - MP.pstateOffset state) (MP.pstateInput state)
+    (spos, f) = foldl'' go (MP.pstateSourcePos state, id) pre
+    go (MP.SourcePos n l c, g) ch =
+      (MP.SourcePos n l (c <> MP.pos1), g . (PP.render (pPrint ch) ++))
 
 advanceParser
   :: MP.Pos
@@ -1456,7 +1450,7 @@ parse :: SrcName -> [Locd (Tok 'Brack)] -> Frag [] 'Parsed
 parse srcName tokens = case MP.runParser parser name tokens of
   Left err -> error $ concat
     [ "internal parsing error: "
-    , MP.parseErrorPretty err
+    , MP.errorBundlePretty err
     ]
   Right result -> result
   where
@@ -1562,9 +1556,9 @@ isWordStart = isAlpha .||. (== '_')
 
 locd :: Tokenizer a -> Tokenizer (Locd a)
 locd tok = do
-  begin <- MP.getPosition
+  begin <- MP.getSourcePos
   result <- tok
-  end <- MP.getPosition
+  end <- MP.getSourcePos
   let loc = locRange begin end
   pure $ result :@ loc
 

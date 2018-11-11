@@ -1,7 +1,9 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
 
+import Data.Text (Text)
 import Kitten
 import Test.HUnit
 import Test.Hspec
@@ -316,5 +318,6 @@ testName = TextName "test"
 testLayout input = bracket testName
   [tok :@ loc | Right tok :@ loc <- testTokenize input]
 
+testParse :: Text -> Frag [] 'Parsed
 testParse input = parse testName
   [tok :@ loc | Right tok :@ loc <- testLayout input]
