@@ -1100,9 +1100,9 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
 
     tokenizer :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
     tokenizer = do
-      -- TODO: Postprocess tokens to adjust line number since 'setPosition' has
-      -- been removed in megaparsec 7.
-      -- MP.setPosition (MP.SourcePos name firstLine MP.pos1)
+      MP.updateParserState \ s -> s
+        { MP.statePosState = (MP.statePosState s)
+          { MP.pstateSourcePos = MP.SourcePos name firstLine MP.pos1 } }
       file
 
     file :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]

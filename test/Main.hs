@@ -158,6 +158,21 @@ spec = do
           , Word $ Unqual Infix "=>"
           ]
 
+  describe "source locations" do
+
+    it "offsets tokens by initial source line" do
+      testTokenizeRow (Row 10)
+        "foo bar\n\
+        \baz\n\
+        \quux\n\
+        \\&"
+        `shouldBe` fmap Right <$>
+        [ Word (Unqual Postfix "foo") :@ Loc testName (Row 10) (Col 1) (Row 10) (Col 4)
+        , Word (Unqual Postfix "bar") :@ Loc testName (Row 10) (Col 5) (Row 10) (Col 8)
+        , Word (Unqual Postfix "baz") :@ Loc testName (Row 11) (Col 1) (Row 11) (Col 4)
+        , Word (Unqual Postfix "quux") :@ Loc testName (Row 12) (Col 1) (Row 12) (Col 5)
+        ]
+
   describe "layout" do
 
     it "desugars basic layout" do
@@ -333,7 +348,10 @@ spec = do
         `shouldBe` emptyFrag
 
 testTokenize :: Text -> [Locd (TokErr + Tok 'Unbrack)]
-testTokenize = tokenize testName (Row 1)
+testTokenize = testTokenizeRow (Row 1)
+
+testTokenizeRow :: Row -> Text -> [Locd (TokErr + Tok 'Unbrack)]
+testTokenizeRow row = tokenize testName row
 
 testName :: SrcName
 testName = TextName "test"
