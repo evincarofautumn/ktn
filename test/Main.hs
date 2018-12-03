@@ -1,5 +1,7 @@
+{-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Main (main) where
 
@@ -14,28 +16,23 @@ main = hspec spec
 spec :: Spec
 spec = do
 
-  describe "test suite" $ do
+  describe "tokenization" do
 
-    it "runs" $ do
-      assertEqual "2 + 2 = 4" (2 + 2) 4
+    describe "whitespace" do
 
-  describe "tokenization" $ do
-
-    describe "whitespace" $ do
-
-      it "produces empty output for empty input" $ do
+      it "produces empty output for empty input" do
         testTokenize "" `shouldBe` []
 
-      it "produces empty output for all-whitespace input" $ do
+      it "produces empty output for all-whitespace input" do
         testTokenize " \n\f\r\t\v\x3000" `shouldBe` []
 
-      it "ignores single-line comment" $ do
+      it "ignores single-line comment" do
         testTokenize "// single-line comment\n" `shouldBe` []
 
-      it "ignores single-line comment at end of file" $ do
+      it "ignores single-line comment at end of file" do
         testTokenize "// single-line comment" `shouldBe` []
 
-      it "ignores multi-line comment" $ do
+      it "ignores multi-line comment" do
         testTokenize
           "/*\n\
           \\tmulti-line\n\
@@ -44,7 +41,7 @@ spec = do
           \\&"
           `shouldBe` []
 
-      it "ignores nested multi-line comment" $ do
+      it "ignores nested multi-line comment" do
         testTokenize
           "/*\n\
           \\tnested\n\
@@ -56,9 +53,9 @@ spec = do
           \\&"
           `shouldBe` []
 
-    describe "symbols" $ do
+    describe "symbols" do
 
-      it "parses adjacent symbols distinctly" $ do
+      it "parses adjacent symbols distinctly" do
 
         -- TODO: < > | \ - _ . \x2192 :
         let
@@ -97,31 +94,31 @@ spec = do
           , UnboxedEnd Unicode
           ]
 
-      it "parses alphabetic word names" $ do
+      it "parses alphabetic word names" do
         locdItem <$> testTokenize "abc"
           `shouldBe` Right <$>
           [ Word $ Unqual Postfix "abc"
           ]
 
-      it "parses alphanumeric word names" $ do
+      it "parses alphanumeric word names" do
         locdItem <$> testTokenize "abc123"
           `shouldBe` Right <$>
           [ Word $ Unqual Postfix "abc123"
           ]
 
-      it "parses word names starting with underscore" $ do
+      it "parses word names starting with underscore" do
         locdItem <$> testTokenize "_abc123"
           `shouldBe` Right <$>
           [ Word $ Unqual Postfix "_abc123"
           ]
 
-      it "parses word names with underscores" $ do
+      it "parses word names with underscores" do
         locdItem <$> testTokenize "one_two_three"
           `shouldBe` Right <$>
           [ Word $ Unqual Postfix "one_two_three"
           ]
 
-      it "parses simple operator names" $ do
+      it "parses simple operator names" do
         locdItem <$> testTokenize "+ - * /"
           `shouldBe` Right <$>
           [ Word $ Unqual Infix "+"
@@ -130,7 +127,7 @@ spec = do
           , Word $ Unqual Infix "/"
           ]
 
-      it "parses operator names overlapping with symbols" $ do
+      it "parses operator names overlapping with symbols" do
         locdItem <$> testTokenize "|| .. \\/ /\\ .#. #.# ->* ||]"
           `shouldBe` Right <$>
           [ Word $ Unqual Infix "||"
@@ -144,7 +141,7 @@ spec = do
           , ListEnd
           ]
 
-      it "parses operators containing angle brackets" $ do
+      it "parses operators containing angle brackets" do
         locdItem <$> testTokenize "< > << >> <= >= <=>"
           `shouldBe` Right <$>
           [ Word $ Unqual Infix "<"
@@ -161,9 +158,9 @@ spec = do
           , Word $ Unqual Infix "=>"
           ]
 
-  describe "layout" $ do
+  describe "layout" do
 
-    it "desugars basic layout" $ do
+    it "desugars basic layout" do
       locdItem <$> testLayout
         "header:\n\
         \  contents\n\
@@ -176,7 +173,7 @@ spec = do
         , BlockEnd
         ]
 
-    it "desugars nested layout" $ do
+    it "desugars nested layout" do
       locdItem <$> testLayout
         "outer:\n\
         \  inner1:\n\
@@ -202,7 +199,7 @@ spec = do
         , BlockEnd
         ]
 
-    it "desugars layout with folded lines" $ do
+    it "desugars layout with folded lines" do
       locdItem <$> testLayout
         "header:\n\
         \  line1 line1 line1\n\
@@ -235,7 +232,7 @@ spec = do
         , BlockEnd
         ]
 
-    it "desugars nested layout with folded lines" $ do
+    it "desugars nested layout with folded lines" do
       locdItem <$> testLayout
         "outer:\n\
         \  inner1:\n\
@@ -277,18 +274,18 @@ spec = do
         , BlockEnd
         ]
 
-    it "raises error on empty layout block at end of input" $ do
+    it "raises error on empty layout block at end of input" do
       locdItem <$> testLayout
         "header:\n\
         \\&"
         `shouldBe`
         [ Right $ Word $ Unqual Postfix "header"
         , Left $ BrackErr
-          (":" :@ Loc testName (Row 1) (Col 7) (Row 1) (Col 8))
-          "start of invalid layout block"
+          ("" :@ Loc testName (Row 1) (Col 10) (Row 1) (Col 10))
+          "empty layout block"
         ]
 
-    it "raises error on empty layout block" $ do
+    it "raises error on empty layout block" do
       locdItem <$> testLayout
         "header1:\n\
         \header2:\n\
@@ -297,8 +294,8 @@ spec = do
         `shouldBe`
         [ Right $ Word $ Unqual Postfix "header1"
         , Left $ BrackErr
-          (":" :@ Loc testName (Row 1) (Col 8) (Row 1) (Col 9))
-          "start of invalid layout block"
+          ("" :@ Loc testName (Row 1) (Col 11) (Row 1) (Col 11))
+          "empty layout block"
         , Right $ Word $ Unqual Postfix "header2"
         , Right BlockBegin
         , Right $ Word $ Unqual Postfix "contents"
@@ -306,15 +303,42 @@ spec = do
         , Right BlockEnd
         ]
 
-  describe "parsing" $ do
+  describe "parsing" do
 
-    it "parses empty fragment from empty input" $ do
+    it "parses empty fragment from empty input" do
       testParse "" `shouldBe` emptyFrag
 
+    it "parses single empty absolute vocab" do
+      testParse
+        "vocab absolute;\n\
+        \\&"
+        `shouldBe` emptyFrag
+
+    it "parses single empty relative vocab" do
+      testParse
+        "vocab relative { }\n\
+        \\&"
+        `shouldBe` emptyFrag
+
+    it "parses empty vocab tree" do
+      testParse
+        "vocab a;\n\
+        \vocab b {\n\
+        \  vocab c {}\n\
+        \}\n\
+        \vocab d::e {\n\
+        \}\n\
+        \vocab f::g;\n\
+        \\&"
+        `shouldBe` emptyFrag
+
+testTokenize :: Text -> [Locd (TokErr + Tok 'Unbrack)]
 testTokenize = tokenize testName (Row 1)
 
+testName :: SrcName
 testName = TextName "test"
 
+testLayout :: Text -> [Locd (BrackErr + Tok 'Brack)]
 testLayout input = bracket testName
   [tok :@ loc | Right tok :@ loc <- testTokenize input]
 

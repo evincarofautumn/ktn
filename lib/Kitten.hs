@@ -1,3 +1,4 @@
+{-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -9,8 +10,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -39,12 +42,12 @@ module Kitten
   , tokenize
   ) where
 
-import Control.Applicative (Alternative, empty, many, optional, some)
-import Control.Monad (join)
+import Control.Applicative (Alternative(..), empty, many, optional, some)
+import Control.Arrow ((|||))
+import Control.Monad (join, mzero)
 import Data.Char
 import Data.Foldable (asum, toList)
 import Data.Function (on)
-import Data.Functor.Identity (Identity)
 import Data.List (foldl', groupBy)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map (Map)
@@ -59,7 +62,9 @@ import GHC.Types (Type)
 import Text.PrettyPrint.HughesPJClass (Pretty(..))
 import Text.Read (readMaybe)
 import qualified Data.Map as M
+import qualified Data.Set as S
 import qualified Data.Text as T
+import qualified Data.Vector as V
 import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
@@ -111,6 +116,21 @@ data CharLit :: Type where
 -- | A column in a source location.
 newtype Col = Col { colVal :: Int }
   deriving (Enum, Eq, Ord, Show)
+
+-- | A top-level program element.
+data Elem :: Phase -> Type where
+  InstElem :: InstDef p -> Elem p
+  MetaElem :: MetaDef p -> Elem p
+  PermSynElem :: PermSyn p -> Elem p
+  PermElem :: PermDef p -> Elem p
+  TermElem :: Term p -> Elem p
+  TraitSynElem :: TraitSyn p -> Elem p
+  TraitElem :: TraitDef p -> Elem p
+  TypeSynElem :: TypeSyn p -> Elem p
+  TypeElem :: TypeDef p -> Elem p
+  VocabSynElem :: VocabSyn p -> Elem p
+  WordSynElem :: WordSyn p -> Elem p
+  WordElem :: WordDef p -> Elem p
 
 -- | The encoding of a token with both ASCII and Unicode spellings.
 data Enc :: Type where
@@ -280,6 +300,23 @@ emptyFrag = Frag
   , fragVocabSyns = empty
   , fragWordSyns = empty
   , fragWords = empty
+  }
+
+
+mapFrag :: (forall a. f a -> f a) -> Frag f p -> Frag f p
+mapFrag f Frag{..} = Frag
+  { fragInsts = f fragInsts
+  , fragMetas = f fragMetas
+  , fragPermSyns = f fragPermSyns
+  , fragPerms = f fragPerms
+  , fragTerms = f fragTerms
+  , fragTraitSyns = f fragTraitSyns
+  , fragTraits = f fragTraits
+  , fragTypeSyns = f fragTypeSyns
+  , fragTypes = f fragTypes
+  , fragVocabSyns = f fragVocabSyns
+  , fragWordSyns = f fragWordSyns
+  , fragWords = f fragWords
   }
 
 deriving instance
@@ -1001,8 +1038,38 @@ deriving instance Eq (Vocab r)
 deriving instance Show (Vocab r)
 
 data VocabSyn :: Phase -> Type where
-  VocabSyn :: VocabSyn p
-  deriving (Eq, Show)
+  VocabSyn ::
+    { vocabSynLoc :: !Loc
+    , vocabSynName :: !(Vocab 'Rel)
+    , vocabSynOf :: !(Name p)
+    } -> VocabSyn p
+
+deriving instance (Eq (Name p)) => Eq (VocabSyn p)
+deriving instance (Show (Name p)) => Show (VocabSyn p)
+
+-- | A tree of vocab definitions containing program elements. This is intended
+-- for preserving the organization of definitions for pretty printing.
+--
+-- A 'VocabLeaf' is a top-level program element. A 'VocabRelBranch' is a
+-- vocabulary introduced with block syntax (@vocab foo::bar { ... }@), relative
+-- to its parent vocabulary. A 'VocabAbsBranch' is a vocabulary introduced with
+-- top-level syntax (@vocab foo::bar; ...@), relative to the global vocabulary.
+data VocabTree :: Phase -> Type where
+  VocabLeaf :: Elem p -> VocabTree p
+  VocabRelBranch :: Vocab 'Rel -> [VocabTree p] -> VocabTree p
+  VocabAbsBranch :: Vocab 'Abs -> [VocabTree p] -> VocabTree p
+
+flattenVocabTree :: VocabTree p -> [Elem p]
+flattenVocabTree = go (VocabAbs mempty)
+  where
+    go :: Vocab 'Abs -> VocabTree p -> [Elem p]
+    go (VocabAbs parts) = \ case
+      -- TODO: add vocab prefix to names
+      VocabLeaf e -> pure e
+      VocabRelBranch (VocabRel parts') vs
+        -> go (VocabAbs (parts <> parts')) =<< vs
+      VocabAbsBranch (VocabAbs parts') vs
+        -> go (VocabAbs parts') =<< vs
 
 data WordDef :: Phase -> Type where
   WordDef :: WordDef p
@@ -1246,12 +1313,8 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
       , between BlockBegin BlockEnd
       , between GroupBegin GroupEnd
       , between ListBegin ListEnd
-      , MP.try layout
+      , layout
       , pure <$> (fromUnbrack . indentedItem =<< MP.satisfy nonbracket)
-      , do
-        loc <- join locRange <$> MP.getSourcePos
-        pure $ pure $ (:@ loc)
-          $ Left $ BrackErr ("" :@ loc) "empty layout block"
       ]
 
     between :: Tok 'Unbrack -> Tok 'Unbrack -> Bracketer [Locd (BrackErr + Tok 'Brack)]
@@ -1337,20 +1400,31 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
     layout = do
       colon@((_ :@ colonLoc) :> colonIndent) <- MP.satisfy
         $ (== Layout) . locdItem . indentedItem
-      body <- some $ layoutLine colonIndent
-      let
-        -- Calculate the source location just past the end of the last token in 
-        pastEnd toks = let
-          lastLoc = locdLoc $ last $ last body
-          in lastLoc
-            { locBeginCol = locEndCol lastLoc
-            , locEndCol = succ $ locEndCol lastLoc
-            }
-        endLoc = pastEnd $ concat body
-        body' = concat $ (\ line -> let
-          termLoc = pastEnd line
-          in line ++ [Right Term :@ termLoc]) <$> body
-      pure $ (Right BlockBegin :@ colonLoc) : body' ++ [Right BlockEnd :@ endLoc]
+      asum
+        [ do
+          body <- some $ layoutLine colonIndent
+          let
+            -- Calculate the source location just past the end of the last token.
+            pastEnd toks = let
+              lastLoc = locdLoc $ last $ last body
+              in lastLoc
+                { locBeginCol = locEndCol lastLoc
+                , locEndCol = succ $ locEndCol lastLoc
+                }
+            endLoc = pastEnd $ concat body
+            body' = concat $ (\ line -> let
+              termLoc = pastEnd line
+              in line ++ [Right Term :@ termLoc]) <$> body
+          pure $ (Right BlockBegin :@ colonLoc) : body' ++ [Right BlockEnd :@ endLoc]
+        -- A layout block always consumes a colon before yielding a tombstone
+        -- for an empty layout block; if this were in 'itemWhere', it would
+        -- always produce an error tombstone, leading to an infinite loop since
+        -- it's called from 'many' and consumes no input.
+        , do
+          loc <- join locRange <$> MP.getSourcePos
+          pure $ pure $ (:@ loc)
+            $ Left $ BrackErr ("" :@ loc) "empty layout block"
+        ]
 
     layoutLine :: Col -> Bracketer [Locd (BrackErr + Tok 'Brack)]
     layoutLine colonIndent = do
@@ -1400,7 +1474,7 @@ instance MP.Stream [Locd (Tok 'Brack)] where
   reachOffset = reachOffset' locdLoc splitAt foldl'
 
 reachOffset'
-  :: forall s a
+  :: forall s
   . (MP.Stream s, Show (MP.Tokens s), Pretty (MP.Token s))
   => (MP.Token s -> Loc)
   -> (Int -> s -> (MP.Tokens s, s))
@@ -1424,8 +1498,9 @@ reachOffset' locOf splitAt' foldl'' o state =
   where
     takeSameLine :: s -> String
     takeSameLine s
-      | Just (x, xs) <- MP.take1_ s
-      = show $ fst $ MP.takeWhile_ ((== locBeginRow (locOf x)) . locBeginRow . locOf) s
+      | Just (x, _xs) <- MP.take1_ s
+      = PP.render $ PP.hsep $ fmap pPrint $ MP.chunkToTokens (Proxy @s)
+        $ fst $ MP.takeWhile_ ((== locBeginRow (locOf x)) . locBeginRow . locOf) s
       | otherwise = ""
 
     addPrefix xs = if sameLine then MP.pstateLinePrefix state ++ xs else xs
@@ -1433,17 +1508,11 @@ reachOffset' locOf splitAt' foldl'' o state =
     (pre, post) = splitAt' (o - MP.pstateOffset state) (MP.pstateInput state)
     (spos, f) = foldl'' go (MP.pstateSourcePos state, id) pre
     go (MP.SourcePos n l c, g) ch =
-      (MP.SourcePos n l (c <> MP.pos1), g . (PP.render (pPrint ch) ++))
-
-advanceParser
-  :: MP.Pos
-  -> MP.SourcePos
-  -> Locd (Tok 'Brack)
-  -> MP.SourcePos
-advanceParser _tabWidth (MP.SourcePos name _row _col) (_ :@ loc)
-  = MP.SourcePos name
-    (MP.mkPos $ rowVal $ locBeginRow loc)
-    (MP.mkPos $ colVal $ locBeginCol loc)
+      ( MP.SourcePos n l (c <> MP.mkPos (colVal (locEndCol loc) - colVal (locBeginCol loc) + 1))
+      , g . ((PP.render (pPrint ch) ++ " ") ++)
+      )
+      where
+        loc = locOf ch
 
 -- | Parse a stream of bracketed tokens into a program fragment.
 parse :: SrcName -> [Locd (Tok 'Brack)] -> Frag [] 'Parsed
@@ -1457,8 +1526,232 @@ parse srcName tokens = case MP.runParser parser name tokens of
     name :: String
     name = show srcName
 
+    -- <program>
+    --   ::= <vocab>*
     parser :: Parser (Frag [] 'Parsed)
-    parser = pure emptyFrag
+    parser = partitionElems . (flattenVocabTree =<<) <$> many vocab <* MP.eof
+
+    -- <vocab>
+    --   ::= "vocab" <vocab-name> "{" <vocab>* "}"
+    --     | "vocab" <vocab-name> ";" <vocab>*
+    --     | "vocab" "synonym" <vocab-name> "(" <name> ")" ";"
+    --     | <elem>
+    vocab :: Parser (VocabTree 'Parsed)
+    vocab = asum
+      [ do
+        loc <- locdLoc <$> match KwdVocab
+        asum
+          [ VocabLeaf <$> do
+            name <- match KwdSynonym *> vocabRelName
+            syn <- grouped unresName <* match Term
+            pure $ VocabSynElem VocabSyn
+              { vocabSynLoc = loc
+              , vocabSynName = name
+              , vocabSynOf = syn
+              }
+          -- TODO: Don't backtrack over the whole name.
+          , MP.try do
+            name <- vocabRelName
+            VocabRelBranch name <$> blocked (many vocab)
+          , do
+            name <- vocabAbsName <* match Term
+            VocabAbsBranch name <$> many vocab
+          ]
+      , do
+        VocabLeaf <$> elem
+      ]
+
+    vocabRelName :: Parser (Vocab 'Rel)
+    vocabRelName = VocabRel . V.fromList <$> namePart `MP.sepBy1` lookup
+
+    postfixName :: Parser Unqual
+    postfixName = extract (S.fromList [ME.Label ('p':|"ostfix name")]) \ case
+      Word name@(Unqual Postfix _) :@ _ -> Just name
+      _ -> Nothing
+
+    infixName :: Parser Unqual
+    infixName = extract (S.fromList [ME.Label ('i':|"nfix name")]) \ case
+      Word name@(Unqual Infix _) :@ _ -> Just name
+      _ -> Nothing
+
+    bareName :: Parser Unqual
+    bareName = postfixName <|> infixName
+
+    namePart :: Parser Unqual
+    namePart = postfixName -- <|> grouped infixName
+
+    -- extract :: (Locd (Tok 'Brack) -> Maybe a) -> Parser a
+    -- TODO: Use non-empty set of expected items.
+    extract = flip MP.token
+
+    vocabAbsName :: Parser (Vocab 'Abs)
+    vocabAbsName = optional global
+      *> (VocabAbs . V.fromList <$> namePart `MP.sepBy1` lookup)
+
+    -- <name>
+    --   ::= ("_" "::")? (<name-part> "::")* <postfix-name>
+    --     | ("_" "::")? (<name-part> "::")* <infix-name>
+    unresName :: Parser Unres
+    unresName = do
+      mGlobal <- optional global
+      prefix <- fmap V.fromList $ many $ MP.try $ namePart <* lookup
+      if V.null prefix
+        then UnresUnqual <$> bareName
+        else case mGlobal of
+          Just{} -> UnresQualAbs . Qual (VocabAbs prefix) <$> bareName
+          Nothing -> UnresQualRel . Qual (VocabRel prefix) <$> bareName
+
+    -- <elem>
+    --   ::= <inst-def>
+    --     | <meta-def>
+    --     | <perm-elem>
+    --     | <trait-elem>
+    --     | <type-elem>
+    --     | <word-elem>
+    --     | <term>
+    elem :: Parser (Elem 'Parsed)
+    elem = asum
+      [ InstElem <$> instDef
+      , MetaElem <$> metaDef
+      , (PermElem ||| PermSynElem) <$> permElem
+      , (TraitElem ||| TraitSynElem) <$> traitElem
+      , (TypeElem ||| TypeSynElem) <$> typeElem
+      , (WordElem ||| WordSynElem) <$> wordElem
+      , TermElem <$> term
+      ]
+
+    -- <inst-def>
+    --   ::= "instance" <qual> <sig> "{" <term>* "}"
+    --     | "instance" <qual> <sig> ";"
+    instDef :: Parser (InstDef 'Parsed)
+    instDef = mzero  -- error "TODO: instDef"
+
+    -- <meta-def>
+    --   ::= "about" <qual> "{" <kvp>* "}"
+    --     | "about" "instance" <qual> "{" <kvp>* "}"
+    --     | "about" "permission" <qual> "{" <kvp>* "}"
+    --     | "about" "trait" <qual> "{" <kvp>* "}"
+    --     | "about" "type" <qual> "{" <kvp>* "}"
+    --     | "about" "vocab" <qual> "{" <kvp>* "}"
+    metaDef :: Parser (MetaDef 'Parsed)
+    metaDef = mzero  -- error "TODO: metaDef"
+
+    -- <perm-elem>
+    --   ::= <perm-def>
+    --     | <perm-syn>
+    --
+    -- <perm-def>
+    --   ::= "permission" <qual> <sig> ";"
+    --     | "permission" <qual> <sig> "{" <term>* "}"
+    --
+    -- <perm-syn>
+    --   ::= "permission" "synonym" <qual> "(" <permit>* ")" ";"
+    permElem :: Parser (PermDef 'Parsed + PermSyn 'Parsed)
+    permElem = mzero  -- error "TODO: permElem"
+
+    -- <trait-elem>
+    --   ::= <trait-def>
+    --     | <trait-syn>
+    --
+    -- <trait-def>
+    --   ::= "trait" <qual> <sig> ";"
+    --     | "trait" <qual> <sig> "{" <term>* "}"
+    --
+    -- <trait-syn>
+    --   ::= "trait" "synonym" <qual> "(" seq(<app-sig>) ")" ";"
+    traitElem :: Parser (TraitDef 'Parsed + TraitSyn 'Parsed)
+    traitElem = mzero  -- error "TODO: traitElem"
+
+    -- <type-elem>
+    --   ::= <type-def>
+    --     | <type-syn>
+    --
+    -- <type-def>
+    --   ::= "type" <qual> <quant>? "{" <case>* "}"
+    --
+    -- <type-syn>
+    --   ::= "type" "synonym" <qual> <quant>? "(" <sig> ")" ";"
+    typeElem :: Parser (TypeDef 'Parsed + TypeSyn 'Parsed)
+    typeElem = mzero  -- error "TODO: typeElem"
+
+    -- <word-elem>
+    --   ::= <word-def>
+    --     | <word-syn>
+    --
+    -- <word-def>
+    --   ::= "define" <qual> <sig> "{" <term>* "}"
+    --
+    -- <word-syn>
+    --   ::= "synonym" <qual> <quant>? "(" <instantiated-name> ")" ";"
+    wordElem :: Parser (WordDef 'Parsed + WordSyn 'Parsed)
+    wordElem = mzero  -- error "TODO: wordElem"
+
+    -- <term>
+    --   ::= <term> "as" <sig>
+    --     | "(" "as" seq(<sig>) ")"
+    --     | "call"
+    --     | "do" "(" <term>* ")" "{" <term>* "}"
+    --     | "(" <term>* ")"
+    --     |
+    --     | "if" ("(" <term>* ")")? "{" <term>* "}"
+    --       ("elif" "(" <term>* ")" "{" <term>* "}")*
+    --       ("else" "{" <term>* "}")?
+    --     | <instantiated-name>
+    --     | "(" <op> ")"
+    --     | "jump"
+    --     | "[" seq(<term>*) "]"
+    --     | "[|" seq(<term>*) "|]"
+    --     | "loop"
+    --     | "match" ("(" <term>* ")")?
+    --       ("case" <pat> <block>)*
+    --       ("else" "{" <term>* "}")?
+    --     | <term>* <op> <term>*
+    --     | <char-lit>
+    --     | <float-lit>
+    --     | <int-lit>
+    --     | <para-lit>
+    --     | <text-lit>
+    --     | "{" <term>* "}"
+    --     | "{|" <term>* "|}"
+    --     | "\" <term>
+    --     | "return"
+    --     | "(" <op> <term>* ")"
+    --     | "(" <term>* <op> ")"
+    term :: Parser (Term 'Parsed)
+    term = MP.failure Nothing (S.fromList [ME.Label ('T':|"ODO: parse term")])  -- error "TODO: term"
+
+    match :: Tok 'Brack -> Parser (Locd (Tok 'Brack))
+    match tok = MP.label (PP.render (pPrint tok))
+      $ MP.satisfy ((== tok) . locdItem)
+
+    grouped :: Parser a -> Parser a
+    grouped = (match GroupBegin *>) . (<* match GroupEnd)
+
+    blocked :: Parser a -> Parser a
+    blocked = (match BlockBegin *>) . (<* match BlockEnd)
+
+    global, ignore, lookup :: Parser (Locd (Tok 'Brack))
+    global = ignore *> lookup
+    ignore = match Ignore
+    lookup = match (Lookup ASCII) <|> match (Lookup Unicode)
+
+    partitionElems :: [Elem 'Parsed] -> Frag [] 'Parsed
+    partitionElems = foldr (flip go) emptyFrag
+      where
+        go :: Frag [] 'Parsed -> Elem 'Parsed -> Frag [] 'Parsed
+        go f@Frag{..} = \ case
+          InstElem x -> f { fragInsts = x : fragInsts }
+          MetaElem x -> f { fragMetas = x : fragMetas }
+          PermSynElem x -> f { fragPermSyns = x : fragPermSyns }
+          PermElem x -> f { fragPerms = x : fragPerms }
+          TermElem x -> f { fragTerms = x : fragTerms }
+          TraitSynElem x -> f { fragTraitSyns = x : fragTraitSyns }
+          TraitElem x -> f { fragTraits = x : fragTraits }
+          TypeSynElem x -> f { fragTypeSyns = x : fragTypeSyns }
+          TypeElem x -> f { fragTypes = x : fragTypes }
+          VocabSynElem x -> f { fragVocabSyns = x : fragVocabSyns }
+          WordSynElem x -> f { fragWordSyns = x : fragWordSyns }
+          WordElem x -> f { fragWords = x : fragWords }
 
 -- | Replace unresolved names with resolved names throughout a fragment.
 rename :: Frag Vector 'Parsed -> Frag Vector 'Renamed

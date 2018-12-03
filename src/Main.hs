@@ -8,7 +8,6 @@ module Main where
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (intercalate)
 import Kitten
 import Text.PrettyPrint.HughesPJClass (Pretty(..))
 import qualified Data.Text as Text

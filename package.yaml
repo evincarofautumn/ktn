@@ -31,6 +31,8 @@ library:
   - pretty
   - text
   - vector
+  ghc-options:
+  - -Wall
 
 executables:
   kitten:
@@ -40,6 +42,7 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -Wall
     dependencies:
     - haskeline
     - ktn
@@ -54,6 +57,7 @@ tests:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -Wall
     dependencies:
     - HUnit
     - hspec
