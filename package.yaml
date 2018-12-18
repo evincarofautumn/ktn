@@ -28,6 +28,7 @@ library:
   - containers
   - ghc-prim
   - megaparsec
+  - microlens
   - pretty
   - text
   - vector
@@ -63,3 +64,4 @@ tests:
     - hspec
     - ktn
     - text
+    - vector

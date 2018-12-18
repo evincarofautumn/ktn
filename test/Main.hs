@@ -1,7 +1,9 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Main (main) where
 
@@ -9,6 +11,7 @@ import Data.Text (Text)
 import Kitten
 import Test.HUnit
 import Test.Hspec
+import qualified Data.Vector as V
 
 main :: IO ()
 main = hspec spec
@@ -346,6 +349,120 @@ spec = do
         \vocab f::g;\n\
         \\&"
         `shouldBe` emptyFrag
+
+    it "parses basic word definition" do
+      case testParse "define nop (->) {}" of
+        Frag
+          { fragWords = [WordDef
+            { wordDefName = UnresUnqual (Unqual Postfix "nop")
+            , wordDefSig = FunSig _ (V.null -> True) (V.null -> True) (V.null -> True)
+            , wordDefBody = Identity () _
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses word definition with 1 input, 1 output" do
+      case testParse "define id_int32 (Int32 -> Int32) {}" of
+        Frag
+          { fragWords = [WordDef
+            { wordDefName = UnresUnqual (Unqual Postfix "id_int32")
+            , wordDefSig = FunSig _
+              (V.toList -> [Int32])
+              (V.toList -> [Int32])
+              (V.null -> True)
+            , wordDefBody = Identity () _
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses word definition with multiple inputs, multiple outputs" do
+      case testParse
+        "define id_3_int32 (Int32, Int32, Int32 -> Int32, Int32, Int32) {}" of
+        Frag
+          { fragWords = [WordDef
+            { wordDefName = UnresUnqual (Unqual Postfix "id_3_int32")
+            , wordDefSig = FunSig _
+              (V.toList -> [Int32, Int32, Int32])
+              (V.toList -> [Int32, Int32, Int32])
+              (V.null -> True)
+            , wordDefBody = Identity () _
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses word definition with simple quantifier" do
+      case testParse
+        "define map_list<A, B> (List<A>, (A -> B) -> List<B>) {}" of
+        Frag
+          { fragWords = [WordDef
+            { wordDefName = UnresUnqual (Unqual Postfix "map_list")
+            , wordDefSig = QuantSig _
+              (Forall _ (V.toList ->
+                [ Var (Unqual Postfix "A") ValueKind
+                , Var (Unqual Postfix "B") ValueKind
+                ]))
+              (FunSig _
+                (V.toList ->
+                  [ AppSig _ (NameSig "List") (NameSig "A")
+                  , (FunSig _
+                    (V.toList -> [NameSig "A"])
+                    (V.toList -> [NameSig "B"])
+                    (V.null -> True))
+                  ])
+                (V.toList -> [AppSig _ (NameSig "List") (NameSig "B")])
+                (V.null -> True))
+            , wordDefBody = Identity () _
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses word definition with complex quantifier" do
+      case testParse
+        "define dimap<F<_, _>, A, B, C as type, D as type, +P>\
+        \ (F<A, B>, (C -> A +P), (B -> D +P) -> F<C, D> +P) {}" of
+        Frag
+          { fragWords = [WordDef
+            { wordDefName = UnresUnqual (Unqual Postfix "dimap")
+            , wordDefSig = QuantSig _
+              (Forall _ (V.toList ->
+                [ Var (Unqual Postfix "F")
+                  (FunKind ValueKind (FunKind ValueKind ValueKind))
+                , Var (Unqual Postfix "A") ValueKind
+                , Var (Unqual Postfix "B") ValueKind
+                , Var (Unqual Postfix "C") ValueKind
+                , Var (Unqual Postfix "D") ValueKind
+                , Var (Unqual Postfix "P") PermKind
+                ]))
+              (FunSig _
+                (V.toList ->
+                  [ AppSig _
+                    (AppSig _ (NameSig "F") (NameSig "A"))
+                    (NameSig "B")
+                  , (FunSig _
+                    (V.toList -> [NameSig "C"])
+                    (V.toList -> [NameSig "A"])
+                    (V.toList -> [Grant (UnresUnqual (Unqual Postfix "P"))]))
+                  , (FunSig _
+                    (V.toList -> [NameSig "B"])
+                    (V.toList -> [NameSig "D"])
+                    (V.toList -> [Grant (UnresUnqual (Unqual Postfix "P"))]))
+                  ])
+                (V.toList ->
+                  [ AppSig _
+                    (AppSig _ (NameSig "F") (NameSig "C"))
+                    (NameSig "D")
+                  ])
+                (V.toList -> [Grant (UnresUnqual (Unqual Postfix "P"))]))
+            , wordDefBody = Identity () _
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+pattern Int32 :: Sig 'Parsed
+pattern Int32 <- VarSig _ (UnresUnqual (Unqual Postfix "Int32"))
+
+pattern NameSig :: Text -> Sig 'Parsed
+pattern NameSig name <- VarSig _ (UnresUnqual (Unqual Postfix name))
 
 testTokenize :: Text -> [Locd (TokErr + Tok 'Unbrack)]
 testTokenize = testTokenizeRow (Row 1)

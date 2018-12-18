@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -27,14 +28,22 @@ module Kitten
   , Fixity(..)
   , Frag(..)
   , Indented(..)
+  , Kind(..)
   , Loc(..)
   , Locd(..)
+  , Permit(..)
   , Phase(..)
+  , Quant(..)
   , Row(..)
+  , Sig(..)
   , SrcName(..)
+  , Term(..)
   , Tok(..)
   , TokErr(..)
   , Unqual(..)
+  , Unres(..)
+  , Var(..)
+  , WordDef(..)
   , type (+)
   , bracket
   , emptyFrag
@@ -51,14 +60,17 @@ import Data.Function (on)
 import Data.List (foldl', groupBy)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map (Map)
+import Data.Maybe (fromMaybe)
 import Data.Ord (Down(..), comparing)
 import Data.Proxy (Proxy(..))
 import Data.Ratio ((%))
+import Data.Semigroup (sconcat)
 import Data.Text (Text)
 import Data.Vector (Vector)
 import Data.Void (Void)
 import GHC.Exts (IsString)
 import GHC.Types (Type)
+import Lens.Micro ((^.), Lens')
 import Text.PrettyPrint.HughesPJClass (Pretty(..))
 import Text.Read (readMaybe)
 import qualified Data.Map as M
@@ -344,6 +356,13 @@ infixl 6 :>
 instance (Pretty a) => Pretty (Indented a) where
   pPrint = pPrint . indentedItem
 
+-- | A name instantiated with type arguments.
+data Instd :: Phase -> Type where
+  Instd :: Name p -> !(Vector (Sig p)) -> Instd p
+
+deriving instance (Eq (Name p)) => Eq (Instd p)
+deriving instance (Show (Name p)) => Show (Instd p)
+
 -- | An instance definition.
 data InstDef :: Phase -> Type where
   InstDef ::
@@ -377,14 +396,16 @@ data IntLit :: Type where
   deriving (Eq, Ord, Show)
 
 -- | The kind of a type variable.
-data Kind :: Type where
-  StackKind :: Kind
-  ValueKind :: Kind
-  LabelKind :: Kind
-  PermKind :: Kind
-  FunKind :: !Kind -> !Kind -> Kind
-  TypeKind :: !(Qual 'Abs) -> Kind
-  deriving (Eq, Show)
+data Kind :: Phase -> Type where
+  StackKind :: Kind p
+  ValueKind :: Kind p
+  LabelKind :: Kind p
+  PermKind :: Kind p
+  FunKind :: !(Kind p) -> !(Kind p) -> Kind p
+  TypeKind :: !(Name p) -> Kind p
+
+deriving instance (Eq (Name p)) => Eq (Kind p)
+deriving instance (Show (Name p)) => Show (Kind p)
 
 -- | A source location, spanning between two (row, column) pairs in the same
 -- source.
@@ -397,6 +418,9 @@ data Loc :: Type where
     , locEndCol :: !Col
     } -> Loc
   deriving (Eq, Show)
+
+class HasLoc a where
+  location :: Lens' a Loc
 
 -- | The 'Ord' instance for 'Loc' sorts lexicographically by source name, then
 -- in /increasing/ order of starting position, and finally in /decreasing/ order
@@ -476,6 +500,13 @@ data PermDef :: Phase -> Type where
   PermDef :: PermDef p
   deriving (Eq, Show)
 
+data Permit :: Phase -> Type where
+  Grant :: !(Name p) -> Permit p
+  Revoke :: !(Name p) -> Permit p
+
+deriving instance (Eq (Name p)) => Eq (Permit p)
+deriving instance (Show (Name p)) => Show (Permit p)
+
 -- | The definition of a permission synonym.
 data PermSyn :: Phase -> Type where
   PermSyn :: PermSyn p
@@ -495,6 +526,20 @@ data Qual :: Root -> Type where
   Qual :: !(Vocab r) -> !Unqual -> Qual r
   deriving (Eq, Show)
 
+-- | A universal or existential quantifier.
+data Quant :: Phase -> Type where
+  Forall :: !Loc -> !(Vector (Var p)) -> Quant p
+  Exists :: !Loc -> !(Vector (Var p)) -> Quant p
+
+deriving instance (Eq (Name p)) => Eq (Quant p)
+deriving instance (Show (Name p)) => Show (Quant p)
+
+instance HasLoc (Quant p) where
+  location :: Lens' (Quant p) Loc
+  location f = \ case
+    Forall loc vs -> (\ loc' -> Forall loc' vs) <$> f loc
+    Exists loc vs -> (\ loc' -> Exists loc' vs) <$> f loc
+
 -- | A resolved name.
 data Res :: Type where
   ResQual :: Qual 'Abs -> Res
@@ -513,31 +558,38 @@ newtype Row = Row { rowVal :: Int }
 
 -- | A parsed type signature.
 data Sig :: Phase -> Type where
-  AppSig :: !(Sig p) -> !(Sig p) -> Sig p
+  AppSig :: !Loc -> !(Sig p) -> !(Sig p) -> Sig p
   FunSig
-    :: !(Vector (Sig p))
+    :: !Loc
     -> !(Vector (Sig p))
-    -> !(Vector (Name p))
+    -> !(Vector (Sig p))
+    -> !(Vector (Permit p))
     -> Sig p
   StackSig
-    :: !Unqual
+    :: !Loc
+    -> !Unqual
     -> !(Vector (Sig p))
     -> !Unqual
     -> !(Vector (Sig p))
-    -> !(Vector (Name p))
+    -> !(Vector (Permit p))
     -> Sig p
-  VarSig :: Name p -> Sig p
-  ForallSig
-    :: !(Vector Var)
-    -> Sig p
-    -> Sig p
-  ExistsSig
-    :: !(Vector Var)
+  VarSig :: !Loc -> Name p -> Sig p
+  QuantSig
+    :: !Loc
+    -> Quant p
     -> Sig p
     -> Sig p
 
 deriving instance (Eq (Name p)) => Eq (Sig p)
 deriving instance (Show (Name p)) => Show (Sig p)
+
+instance HasLoc (Sig p) where
+  location f = \ case
+    AppSig loc a b -> (\ loc' -> AppSig loc' a b) <$> f loc
+    FunSig loc l r p -> (\ loc' -> FunSig loc' l r p) <$> f loc
+    StackSig loc l ls r rs p -> (\ loc' -> StackSig loc' l ls r rs p) <$> f loc
+    VarSig loc n -> (\ loc' -> VarSig loc' n) <$> f loc
+    QuantSig loc q s -> (\ loc' -> QuantSig loc' q s) <$> f loc
 
 -- | The name of a source of code.
 data SrcName :: Type where
@@ -764,7 +816,7 @@ deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Term p)
 deriving instance (Show (Anno p), Show (Name p)) => Show (Term p)
 
 -- | An existential type variable in a type.
-newtype TEVar = TEVar Var
+newtype TEVar = TEVar (Var 'Renamed)
   deriving (Show)
 
 -- | The contents of a text literal.
@@ -982,7 +1034,7 @@ data TraitSyn :: Phase -> Type where
   deriving (Eq, Show)
 
 -- | A type variable in a type.
-newtype TVar = TVar Var
+newtype TVar = TVar (Var 'Renamed)
   deriving (Show)
 
 -- | A type in the typechecker.
@@ -1025,9 +1077,11 @@ data Unres :: Type where
   deriving (Eq, Show)
 
 -- | A variable in a quantifier in a type signature.
-data Var :: Type where
-  Var :: !Unqual -> !Kind -> Var
-  deriving (Eq, Show)
+data Var :: Phase -> Type where
+  Var :: !Unqual -> !(Kind p) -> Var p
+
+deriving instance (Eq (Name p)) => Eq (Var p)
+deriving instance (Show (Name p)) => Show (Var p)
 
 -- | A vocab qualifier.
 data Vocab :: Root -> Type where
@@ -1072,12 +1126,26 @@ flattenVocabTree = go (VocabAbs mempty)
         -> go (VocabAbs parts') =<< vs
 
 data WordDef :: Phase -> Type where
-  WordDef :: WordDef p
-  deriving (Eq, Show)
+  WordDef ::
+    { wordDefLoc :: !Loc
+    , wordDefName :: !(Name p)
+    , wordDefSig :: !(Sig p)
+    , wordDefBody :: !(Term p)
+    } -> WordDef p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (WordDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (WordDef p)
 
 data WordSyn :: Phase -> Type where
-  WordSyn :: WordSyn p
-  deriving (Eq, Show)
+  WordSyn ::
+    { wordSynLoc :: !Loc
+    , wordSynName :: !(Name p)
+    , wordSynQuant :: !(Maybe (Quant p))
+    , wordSynOf :: !(Instd p)
+    } -> WordSyn p
+
+deriving instance (Eq (Name p)) => Eq (WordSyn p)
+deriving instance (Show (Name p)) => Show (WordSyn p)
 
 type a + b = Either a b
 infixl 6 +
@@ -1421,7 +1489,7 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
         -- always produce an error tombstone, leading to an infinite loop since
         -- it's called from 'many' and consumes no input.
         , do
-          loc <- join locRange <$> MP.getSourcePos
+          loc <- getSourceLoc
           pure $ pure $ (:@ loc)
             $ Left $ BrackErr ("" :@ loc) "empty layout block"
         ]
@@ -1578,7 +1646,7 @@ parse srcName tokens = case MP.runParser parser name tokens of
     bareName = postfixName <|> infixName
 
     namePart :: Parser Unqual
-    namePart = postfixName -- <|> grouped infixName
+    namePart = postfixName <|> grouped infixName
 
     -- extract :: (Locd (Tok 'Brack) -> Maybe a) -> Parser a
     -- TODO: Use non-empty set of expected items.
@@ -1589,17 +1657,16 @@ parse srcName tokens = case MP.runParser parser name tokens of
       *> (VocabAbs . V.fromList <$> namePart `MP.sepBy1` lookup)
 
     -- <name>
-    --   ::= ("_" "::")? (<name-part> "::")* <postfix-name>
-    --     | ("_" "::")? (<name-part> "::")* <infix-name>
+    --   ::= ("_" "::")? (<name-part> "::")* <name-part>
     unresName :: Parser Unres
     unresName = do
       mGlobal <- optional global
       prefix <- fmap V.fromList $ many $ MP.try $ namePart <* lookup
       if V.null prefix
-        then UnresUnqual <$> bareName
+        then UnresUnqual <$> (bareName <|> grouped infixName)
         else case mGlobal of
-          Just{} -> UnresQualAbs . Qual (VocabAbs prefix) <$> bareName
-          Nothing -> UnresQualRel . Qual (VocabRel prefix) <$> bareName
+          Just{} -> UnresQualAbs . Qual (VocabAbs prefix) <$> namePart
+          Nothing -> UnresQualRel . Qual (VocabRel prefix) <$> namePart
 
     -- <elem>
     --   ::= <inst-def>
@@ -1684,7 +1751,174 @@ parse srcName tokens = case MP.runParser parser name tokens of
     -- <word-syn>
     --   ::= "synonym" <qual> <quant>? "(" <instantiated-name> ")" ";"
     wordElem :: Parser (WordDef 'Parsed + WordSyn 'Parsed)
-    wordElem = mzero  -- error "TODO: wordElem"
+    wordElem = Left <$> wordDef <|> Right <$> wordSyn
+      where
+        wordDef = do
+          _ :@ loc <- match KwdDefine
+          WordDef loc <$> unresName <*> signature <*> blocked expr
+
+        wordSyn = do
+          _ :@ loc <- match KwdSynonym
+          WordSyn loc
+            <$> unresName
+            <*> optional quant
+            <*> (grouped instdName <* match Term)
+
+    signature :: Parser (Sig 'Parsed)
+    signature = MP.label "type signature"
+      $ quantified (grouped functionType)
+      <|> grouped functionType
+
+    functionType :: Parser (Sig 'Parsed)
+    functionType = MP.label "function type" do
+      effect <- asum
+        [ MP.label "stack-polymorphic function type" do
+          l :@ ll <- stack
+          ls <- fromMaybe [] <$> optional (match Seq *> left)
+          r :@ rl <- arrow *> stack
+          rs <- fromMaybe [] <$> optional (match Seq *> right)
+          let
+            loc = case concat
+              [ (^. location) <$> ls
+              , (^. location) <$> rs
+              ] of
+              [] -> ll <> rl
+              (x:xs) -> ll <> sconcat (x :| xs) <> rl
+          pure $ StackSig loc l (V.fromList ls) r (V.fromList rs)
+        , MP.label "basic function type" do
+          ls <- left
+          _ :@ al <- arrow
+          rs <- right
+          let loc = sconcat $ al :| ((^. location) <$> ls) <> ((^. location) <$> rs)
+          pure $ FunSig loc (V.fromList ls) (V.fromList rs)
+        ]
+      permits <- MP.label "permission labels" $ V.fromList <$> many permit
+      pure $ effect permits
+      where
+
+        stack :: Parser (Locd Unqual)
+        stack = do
+          sigilLoc <- getSourceLoc <* ellipsis
+          (nameLoc, name) <- (,) <$> getSourceLoc <*> postfixName
+          pure (name :@ (sigilLoc <> nameLoc))
+
+        left, right :: Parser [Sig 'Parsed]
+        left = basicType `MP.sepEndBy` match Seq
+        right = type_ `MP.sepEndBy` match Seq
+
+    permit :: Parser (Permit 'Parsed)
+    permit = Grant <$> (match (Word (Unqual Infix "+")) *> unresName)
+      <|> Revoke <$> (match (Word (Unqual Infix "-")) *> unresName)
+
+    basicType :: Parser (Sig 'Parsed)
+    basicType = MP.label "basic type" do
+      prefix <- asum
+        [ quantified $ grouped type_
+        , MP.try do
+          loc <- getSourceLoc
+          name <- unresName
+          pure $ VarSig loc name
+        , grouped type_
+        ]
+      let apply a b = AppSig ((a ^. location) <> (b ^. location)) a b
+      suffixes <- concat <$> many typeList
+      pure $ foldl' apply prefix suffixes
+
+    type_ :: Parser (Sig 'Parsed)
+    type_ = MP.label "type" $ MP.try functionType <|> basicType
+
+    -- <instd>
+    --   ::= <name> ("::" "<" <sig> ("," <sig>)* ">")?
+    instdName :: Parser (Instd 'Parsed)
+    instdName = MP.label "instantiated name" $ Instd
+      <$> unresName
+      <*> (MP.label "type arguments" $ V.fromList . fromMaybe []
+        <$> optional (lookup *> typeList))
+
+    typeList :: Parser [Sig 'Parsed]
+    typeList = angled (type_ `MP.sepBy1` match Seq)
+
+    quant :: Parser (Quant 'Parsed)
+    quant = MP.label "quantifier" do
+      -- TODO: Compute full source location.
+      loc <- getSourceLoc
+      MP.label "universal quantifier" (Forall loc <$> angled vars)
+        <|> MP.label "existential quantifier" (Exists loc <$> bracketed vars)
+      where
+        -- TODO: Insert tombstone if there are no vars?
+        vars = V.fromList <$> (var `MP.sepBy` match Seq)
+
+    quantified :: Parser (Sig 'Parsed) -> Parser (Sig 'Parsed)
+    quantified p = do
+      q <- quant
+      t <- p
+      pure $ QuantSig ((q ^. location) <> (t ^. location)) q t
+
+    -- <var>
+    --   ::= <kind-sigil>? <postfix-name> <var-type-params>?
+    --     | <postfix-name> "as" <sig>
+    --
+    -- <kind-sigil>
+    --   ::= "..." | "+"
+    --
+    -- <var-type-params>
+    --   ::= "<" <var-type-param> ("," <var-type-param>)* ">"
+    --
+    -- <var-type-param>
+    --   ::= <kind-sigil>? <postfix-name> <var-type-params>?
+    --     | <kind-sigil>? "_" <var-type-params>?
+    --
+    -- Examples:
+    --
+    --     Type
+    --     +Permission
+    --     ...Stack
+    --     Functor<Type>
+    --     Functor<_>
+    --     Profunctor<A, B>
+    --     Profunctor<_, _>
+    --     Transformer<Monad<_>, T>
+    --     FunctionLike<..._, ..._, +_>
+    --     +ParameterizedPermission<_>
+    --     T as type
+    --     P as permission
+    --     S as stack
+    --     N as Size
+    --     Functor as type -> type
+    --     FunctionLike as stack -> stack -> permission -> type
+    --
+    var :: Parser (Var 'Parsed)
+    var = MP.label "type parameter"
+      $ uncurry Var <$> var' (MP.label "type variable name" postfixName)
+      where
+        var' :: Parser n -> Parser (n, Kind 'Parsed)
+        var' identifier = do
+          sigil <- optional kindSigil
+          name <- identifier
+          asum
+            [ do
+              kinds <- match KwdAs *> (kindName `MP.sepBy1` arrow)
+              pure (name, foldr1 FunKind kinds)
+            , do
+              params <- fmap snd . fromMaybe [] <$> optional
+                (angled (var' (() <$ ignore <|> () <$ postfixName) `MP.sepBy1` match Seq))
+              let kind = fromMaybe ValueKind sigil
+              pure (name, foldr FunKind kind params)
+            ]
+
+        kindSigil = MP.label "kind sigil" $ asum
+          [ StackKind <$ match (Ellipsis ASCII)
+          , StackKind <$ match (Ellipsis Unicode)
+          , PermKind <$ match (Word (Unqual Infix "+"))
+          ]
+
+    kindName :: Parser (Kind 'Parsed)
+    kindName = MP.label "kind name" $ asum
+      [ ValueKind <$ match KwdType
+      , PermKind <$ match KwdPermission
+      , StackKind <$ match (Word (Unqual Postfix "stack"))
+      , TypeKind <$> unresName
+      ]
 
     -- <term>
     --   ::= <term> "as" <sig>
@@ -1720,6 +1954,11 @@ parse srcName tokens = case MP.runParser parser name tokens of
     term :: Parser (Term 'Parsed)
     term = MP.failure Nothing (S.fromList [ME.Label ('T':|"ODO: parse term")])  -- error "TODO: term"
 
+    expr :: Parser (Term 'Parsed)
+    expr = do
+      loc <- getSourceLoc
+      foldl' (Compose ()) (Identity () loc) <$> many term
+
     match :: Tok 'Brack -> Parser (Locd (Tok 'Brack))
     match tok = MP.label (PP.render (pPrint tok))
       $ MP.satisfy ((== tok) . locdItem)
@@ -1730,7 +1969,19 @@ parse srcName tokens = case MP.runParser parser name tokens of
     blocked :: Parser a -> Parser a
     blocked = (match BlockBegin *>) . (<* match BlockEnd)
 
-    global, ignore, lookup :: Parser (Locd (Tok 'Brack))
+    bracketed :: Parser a -> Parser a
+    bracketed = (match ListBegin *>) . (<* match ListEnd)
+
+    angled :: Parser a -> Parser a
+    angled p
+      = (match (AngleBegin ASCII) <|> match (Word (Unqual Infix "<")))
+        *> p
+        <* (match (AngleEnd ASCII) <|> match (Word (Unqual Infix ">")))
+      <|> match (AngleBegin Unicode) *> p <* match (AngleEnd Unicode)
+
+    arrow, ellipsis, global, ignore, lookup :: Parser (Locd (Tok 'Brack))
+    arrow = match (Arrow ASCII) <|> match (Arrow Unicode)
+    ellipsis = match (Ellipsis ASCII) <|> match (Ellipsis Unicode)
     global = ignore *> lookup
     ignore = match Ignore
     lookup = match (Lookup ASCII) <|> match (Lookup Unicode)
@@ -1752,6 +2003,9 @@ parse srcName tokens = case MP.runParser parser name tokens of
           VocabSynElem x -> f { fragVocabSyns = x : fragVocabSyns }
           WordSynElem x -> f { fragWordSyns = x : fragWordSyns }
           WordElem x -> f { fragWords = x : fragWords }
+
+getSourceLoc :: (MP.Stream [t]) => MP.Parsec Void [t] Loc
+getSourceLoc = join locRange <$> MP.getSourcePos
 
 -- | Replace unresolved names with resolved names throughout a fragment.
 rename :: Frag Vector 'Parsed -> Frag Vector 'Renamed

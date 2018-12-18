@@ -54,6 +54,7 @@ extra-deps:
 - hspec-expectations-0.8.2
 - integer-logarithms-1.0.2.2
 - megaparsec-7.0.1
+- microlens-0.4.10
 - mintty-0.1.2
 - parser-combinators-1.0.0
 - primitive-0.6.4.0
