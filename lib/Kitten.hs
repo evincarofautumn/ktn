@@ -20,8 +20,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Kitten
-  ( Brack(..)
-  , BrackErr(..)
+  ( BrackErr(..)
   , Col(..)
   , Enc(..)
   , ErrMsg(..)
@@ -39,7 +38,7 @@ module Kitten
   , SrcName(..)
   , Term(..)
   , Tok(..)
-  , TokErr(..)
+  , TokPhase(..)
   , Unqual(..)
   , Unres(..)
   , Var(..)
@@ -104,12 +103,12 @@ data Box :: Type where
   Box :: Box
   deriving (Eq, Show)
 
--- | Bracketing of a token: whether it may be a layout token. After bracketing,
--- a stream of tokens of type @[Tok 'Brack]@ contains matched brackets instead
--- of layout tokens.
-data Brack :: Type where
-  Unbrack :: Brack
-  Brack :: Brack
+-- | Phase of a token: whether it may be a layout token. After bracketing, a
+-- stream of tokens of type @[Tok 'Brack]@ contains matched brackets instead of
+-- layout tokens.
+data TokPhase :: Type where
+  Unbrack :: TokPhase
+  Brack :: TokPhase
   deriving (Show)
 
 -- | An indentation error.
@@ -152,7 +151,7 @@ data Enc :: Type where
 
 -- | An error message.
 newtype ErrMsg = ErrMsg Text
-  deriving (Eq, IsString, Show)
+  deriving (Eq, IsString, Ord, Show)
 
 -- | An escape in a character, text, or paragraph literal.
 data Esc :: Type where
@@ -824,9 +823,9 @@ data TextLit :: Type where
   TextLit :: !(Vector (Esc + Text)) -> TextLit
   deriving (Eq, Ord, Show)
 
--- | A token, indexed by a 'Brack'eting that indicates whether it has been
--- 'bracket'ed.
-data Tok :: Brack -> Type where
+-- | A token, indexed by a 'TokPhase' that indicates whether it has been
+-- 'bracket'ed and whether it contains lexical errors.
+data Tok :: TokPhase -> Type where
 
   -- Keywords
 
@@ -948,6 +947,11 @@ data Tok :: Brack -> Type where
   -- | Word name.
   Word :: !Unqual -> Tok b
 
+  -- | A lexical error.
+  --
+  -- TODO: Add a flag to disable this constructor to exclude errors.
+  TokErr :: !Text -> !ErrMsg -> Tok b
+
   deriving (Eq, Ord, Show)
 
 instance Pretty (Tok b) where
@@ -1014,14 +1018,11 @@ instance Pretty (Tok b) where
     Text ASCII lit -> PP.hcat ["\"", "..." {- pPrint lit -}, "\""]
     Text Unicode lit -> PP.hcat ["\x201C", "..." {- pPrint lit -}, "\x201D"]
     Word name -> pPrint name
+    TokErr src (ErrMsg msg) -> PP.hcat
+      [PP.text $ T.unpack src, " /*", PP.text $ T.unpack msg, "*/"]
 
 -- | A character tokenizer.
 type Tokenizer = MP.Parsec Void Text
-
--- | A lexical error.
-data TokErr :: Type where
-  TokErr :: !(Locd Text) -> !ErrMsg -> TokErr
-  deriving (Eq, Show)
 
 -- | The definition of a trait.
 data TraitDef :: Phase -> Type where
@@ -1152,7 +1153,7 @@ infixl 6 +
 
 -- | Tokenize a source fragment into a stream of tokens interspersed with
 -- lexical errors.
-tokenize :: SrcName -> Row -> Text -> [Locd (TokErr + Tok 'Unbrack)]
+tokenize :: SrcName -> Row -> Text -> [Locd (Tok 'Unbrack)]
 tokenize srcName row input = case MP.runParser tokenizer name input of
   Left err -> error $ concat
     [ "internal tokenizer error: "
@@ -1166,14 +1167,14 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     firstLine :: MP.Pos
     firstLine = MP.mkPos $ rowVal row
 
-    tokenizer :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
+    tokenizer :: Tokenizer [Locd (Tok 'Unbrack)]
     tokenizer = do
       MP.updateParserState \ s -> s
         { MP.statePosState = (MP.statePosState s)
           { MP.pstateSourcePos = MP.SourcePos name firstLine MP.pos1 } }
       file
 
-    file :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
+    file :: Tokenizer [Locd (Tok 'Unbrack)]
     file = MP.between silence MP.eof tokens
 
     silence :: Tokenizer ()
@@ -1184,11 +1185,11 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdsym :: Text -> Tokenizer (Locd Text)
     locdsym = ML.lexeme silence . locd . MC.string
 
-    locdsym' :: Text -> Tok b -> Tokenizer (Locd (e + Tok b))
-    locdsym' sym tok = (Right tok <$) <$> locdsym sym
+    locdsym' :: Text -> Tok b -> Tokenizer (Locd (Tok b))
+    locdsym' sym tok = (tok <$) <$> locdsym sym
 
-    locdsymNot :: Tokenizer a -> Text -> Tok b -> Tokenizer (Locd (e + Tok b))
-    locdsymNot exclude sym tok = MP.try $ fmap (fmap (Right . const tok))
+    locdsymNot :: Tokenizer a -> Text -> Tok b -> Tokenizer (Locd (Tok b))
+    locdsymNot exclude sym tok = MP.try $ fmap (fmap (const tok))
       $ ML.lexeme silence $ locd $ MC.string sym
         <* MP.notFollowedBy (MP.try exclude)
 
@@ -1196,8 +1197,8 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdkwd = ML.lexeme silence . locd
       . (<* MP.notFollowedBy (MP.try wordChar)) . MC.string
 
-    locdkwd' :: Text -> Tok b -> Tokenizer (Locd (e + Tok b))
-    locdkwd' kwd tok = (Right tok <$) <$> locdkwd kwd
+    locdkwd' :: Text -> Tok b -> Tokenizer (Locd (Tok b))
+    locdkwd' kwd tok = (tok <$) <$> locdkwd kwd
 
     wordChar :: Tokenizer Char
     wordChar = MP.satisfy isWordChar
@@ -1208,7 +1209,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     operatorChar :: Tokenizer Char
     operatorChar = MP.satisfy isOperatorChar
 
-    tokens :: Tokenizer [Locd (TokErr + Tok 'Unbrack)]
+    tokens :: Tokenizer [Locd (Tok 'Unbrack)]
     tokens = many token
 
     word :: Tokenizer Text
@@ -1223,7 +1224,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdop :: Tokenizer (Locd Text)
     locdop = ML.lexeme silence $ locd operator
 
-    token :: Tokenizer (Locd (TokErr + Tok 'Unbrack))
+    token :: Tokenizer (Locd (Tok 'Unbrack))
     token = asum
       [ locdsymNot operatorChar "<" $ Word $ Unqual Infix "<"
       , locdsym' "<"      $ AngleBegin ASCII
@@ -1242,7 +1243,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         _ :@ brackLoc <- locd $ MC.string "{"
         bar <- optional $ locd $ MC.string "|"
         _ <- silence
-        pure $ Right <$> case bar of
+        pure case bar of
           Just (_ :@ barLoc) -> UnboxedBegin ASCII :@ (brackLoc <> barLoc)
           Nothing -> BlockBegin :@ brackLoc
       , locdsym' "}"      BlockEnd
@@ -1256,7 +1257,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         _ :@ firstLoc <- locd $ MC.string ":"
         second <- optional $ locd $ MC.string ":"
         _ <- silence
-        pure $ Right <$> case second of
+        pure case second of
           Just (_ :@ secondLoc) -> Look ASCII :@ (firstLoc <> secondLoc)
           Nothing -> Layout :@ firstLoc
       -- "[" and "[|"
@@ -1264,7 +1265,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         _ :@ brackLoc <- locd $ MC.string "["
         bar <- optional $ locd $ MC.string "|"
         _ <- silence
-        pure $ Right <$> case bar of
+        pure case bar of
           Just (_ :@ barLoc) -> ArrayBegin ASCII :@ (brackLoc <> barLoc)
           Nothing -> ListBegin :@ brackLoc
       , locdsym' "]"      ListEnd
@@ -1304,8 +1305,8 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdkwd' "vocab"      KwdVocab
       , locdkwd' "with"       KwdWith
 
-      , fmap (Right . Word . Unqual Infix) <$> locdop
-      , fmap (Right . Word . Unqual Postfix) <$> locdword
+      , fmap (Word . Unqual Infix) <$> locdop
+      , fmap (Word . Unqual Postfix) <$> locdword
       ]
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
@@ -1444,6 +1445,7 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
       Para enc lit -> pure $ Right $ Para enc lit
       Text enc lit -> pure $ Right $ Text enc lit
       Word name -> pure $ Right $ Word name
+      TokErr src msg -> pure $ Right $ TokErr src msg
 
     nonbracket :: Indented (Locd (Tok 'Unbrack)) -> Bool
     nonbracket = not . (`elem` bracks') . locdItem . indentedItem

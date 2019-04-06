@@ -68,7 +68,7 @@ spec = do
             \:::[[|]\x2237''\\,#;\x2983|}\x2984"
 
         locdItem <$> testTokenize symbols
-          `shouldBe` Right <$>
+          `shouldBe`
           [ ArrayEnd ASCII
           , ArrayEnd Unicode
           , Arrow ASCII
@@ -99,31 +99,31 @@ spec = do
 
       it "parses alphabetic word names" do
         locdItem <$> testTokenize "abc"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Postfix "abc"
           ]
 
       it "parses alphanumeric word names" do
         locdItem <$> testTokenize "abc123"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Postfix "abc123"
           ]
 
       it "parses word names starting with underscore" do
         locdItem <$> testTokenize "_abc123"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Postfix "_abc123"
           ]
 
       it "parses word names with underscores" do
         locdItem <$> testTokenize "one_two_three"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Postfix "one_two_three"
           ]
 
       it "parses simple operator names" do
         locdItem <$> testTokenize "+ - * /"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Infix "+"
           , Word $ Unqual Infix "-"
           , Word $ Unqual Infix "*"
@@ -132,7 +132,7 @@ spec = do
 
       it "parses operator names overlapping with symbols" do
         locdItem <$> testTokenize "|| .. \\/ /\\ .#. #.# ->* ||]"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Infix "||"
           , Word $ Unqual Infix ".."
           , Word $ Unqual Infix "\\/"
@@ -146,7 +146,7 @@ spec = do
 
       it "parses operators containing angle brackets" do
         locdItem <$> testTokenize "< > << >> <= >= <=>"
-          `shouldBe` Right <$>
+          `shouldBe`
           [ Word $ Unqual Infix "<"
           , Word $ Unqual Infix ">"
           , AngleBegin ASCII
@@ -169,7 +169,7 @@ spec = do
         \baz\n\
         \quux\n\
         \\&"
-        `shouldBe` fmap Right <$>
+        `shouldBe`
         [ Word (Unqual Postfix "foo") :@ Loc testName (Row 10) (Col 1) (Row 10) (Col 4)
         , Word (Unqual Postfix "bar") :@ Loc testName (Row 10) (Col 5) (Row 10) (Col 8)
         , Word (Unqual Postfix "baz") :@ Loc testName (Row 11) (Col 1) (Row 11) (Col 4)
@@ -464,18 +464,17 @@ pattern Int32 <- VarSig _ (UnresUnqual (Unqual Postfix "Int32"))
 pattern NameSig :: Text -> Sig 'Parsed
 pattern NameSig name <- VarSig _ (UnresUnqual (Unqual Postfix name))
 
-testTokenize :: Text -> [Locd (TokErr + Tok 'Unbrack)]
+testTokenize :: Text -> [Locd (Tok 'Unbrack)]
 testTokenize = testTokenizeRow (Row 1)
 
-testTokenizeRow :: Row -> Text -> [Locd (TokErr + Tok 'Unbrack)]
+testTokenizeRow :: Row -> Text -> [Locd (Tok 'Unbrack)]
 testTokenizeRow row = tokenize testName row
 
 testName :: SrcName
 testName = TextName "test"
 
 testLayout :: Text -> [Locd (BrackErr + Tok 'Brack)]
-testLayout input = bracket testName
-  [tok :@ loc | Right tok :@ loc <- testTokenize input]
+testLayout = bracket testName . testTokenize
 
 testParse :: Text -> Frag [] 'Parsed
 testParse input = parse testName

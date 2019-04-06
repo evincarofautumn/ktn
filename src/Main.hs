@@ -24,16 +24,15 @@ main = Haskeline.runInputT Haskeline.defaultSettings loop
         Just entry -> do
           let entry' = Text.pack [if c == '`' then '\n' else c | c <- entry]
           let interactiveName = TextName "interactive"
-          tokens :: SomeException + [Locd (TokErr + Tok 'Unbrack)]
+          tokens :: SomeException + [Locd (Tok 'Unbrack)]
             <- liftIO $ try $ evaluate
             $ tokenize interactiveName (Row 1) entry'
           case tokens of
             Left e -> nop
             Right tokens' -> do
-              let tokens'' = [tok :@ loc | Right tok :@ loc <- tokens']
               bracketed :: SomeException + [Locd (BrackErr + Tok 'Brack)]
                 <- liftIO $ try $ evaluate
-                $ bracket interactiveName tokens''
+                $ bracket interactiveName tokens'
               case bracketed of
                 Left e -> nop
                 Right bracketed' -> do
