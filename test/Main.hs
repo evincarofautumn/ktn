@@ -81,12 +81,12 @@ spec = do
           , GroupBegin
           , GroupEnd
           , Ignore
-          , Lookup ASCII
+          , Look ASCII
           , Layout
           , ListBegin
           , ArrayBegin ASCII
           , ListEnd
-          , Lookup Unicode
+          , Look Unicode
           , Quote
           , Ref
           , Seq

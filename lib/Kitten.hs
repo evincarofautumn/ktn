@@ -912,7 +912,7 @@ data Tok :: Brack -> Type where
   -- | End of list: U+005D RIGHT SQUARE BRACKET.
   ListEnd :: Tok b
   -- | Vocabulary lookup: U+003A U+003A COLON or U+2237 PROPORTION.
-  Lookup :: !Enc -> Tok b
+  Look :: !Enc -> Tok b
   -- | Compile-time quotation: @''@.
   Quote :: Tok b
   -- | Reference to term: U+005C BACKSLASH.
@@ -994,8 +994,8 @@ instance Pretty (Tok b) where
     Layout -> ":"
     ListBegin -> "["
     ListEnd -> "]"
-    Lookup ASCII -> "::"
-    Lookup Unicode -> "\x2237"
+    Look ASCII -> "::"
+    Look Unicode -> "\x2237"
     Quote -> "''"
     Ref -> "\\"
     Seq -> ","
@@ -1188,8 +1188,9 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     locdsym' sym tok = (Right tok <$) <$> locdsym sym
 
     locdsymNot :: Tokenizer a -> Text -> Tok b -> Tokenizer (Locd (e + Tok b))
-    locdsymNot not sym tok = MP.try $ fmap (fmap (Right . const tok))
-      $ ML.lexeme silence $ locd $ MC.string sym <* MP.notFollowedBy (MP.try not)
+    locdsymNot exclude sym tok = MP.try $ fmap (fmap (Right . const tok))
+      $ ML.lexeme silence $ locd $ MC.string sym
+        <* MP.notFollowedBy (MP.try exclude)
 
     locdkwd :: Text -> Tokenizer (Locd Text)
     locdkwd = ML.lexeme silence . locd
@@ -1256,7 +1257,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         second <- optional $ locd $ MC.string ":"
         _ <- silence
         pure $ Right <$> case second of
-          Just (_ :@ secondLoc) -> Lookup ASCII :@ (firstLoc <> secondLoc)
+          Just (_ :@ secondLoc) -> Look ASCII :@ (firstLoc <> secondLoc)
           Nothing -> Layout :@ firstLoc
       -- "[" and "[|"
       , do
@@ -1267,7 +1268,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
           Just (_ :@ barLoc) -> ArrayBegin ASCII :@ (brackLoc <> barLoc)
           Nothing -> ListBegin :@ brackLoc
       , locdsym' "]"      ListEnd
-      , locdsym' "\x2237" $ Lookup Unicode
+      , locdsym' "\x2237" $ Look Unicode
       -- TODO: character literals
       , locdsym' "''"     Quote
       , locdsymNot operatorChar "\\" Ref
@@ -1349,20 +1350,17 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
 -- as folded lines, and no terminators will be inserted.
 --
 bracket :: SrcName -> [Locd (Tok 'Unbrack)] -> [Locd (BrackErr + Tok 'Brack)]
-bracket srcName tokens = case MP.runParser bracketer name indented of
+bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
   Left err -> error $ concat
     [ "internal bracketing error: "
     , MP.errorBundlePretty err
     ]
   Right result -> result
   where
-    indented = concat $ zipWith indentEach indents lines
+    indented = concat $ zipWith indentEach indents rows
     indentEach indent line = (:> indent) <$> line
-    indents = locBeginCol . locdLoc . head <$> lines
-    lines = groupBy ((==) `on` locBeginRow . locdLoc) tokens
-
-    name :: String
-    name = show srcName
+    indents = locBeginCol . locdLoc . head <$> rows
+    rows = groupBy ((==) `on` locBeginRow . locdLoc) tokens
 
     bracketer :: Bracketer [Locd (BrackErr + Tok 'Brack)]
     bracketer = concat <$> many item <* MP.eof
@@ -1427,12 +1425,12 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
       GroupBegin -> pure $ Right $ GroupBegin
       GroupEnd -> pure $ Right GroupEnd
       Ignore -> pure $ Right Ignore
-      tok@Layout -> pure $ Left $ BrackErr
+      Layout -> pure $ Left $ BrackErr
         (T.pack (PP.render $ pPrint tok) :@ loc)
         "start of invalid layout block"
       ListBegin -> pure $ Right ListBegin
       ListEnd -> pure $ Right ListEnd
-      Lookup enc -> pure $ Right $ Lookup enc
+      Look enc -> pure $ Right $ Look enc
       Quote -> pure $ Right Quote
       Ref -> pure $ Right Ref
       Seq -> pure $ Right Seq
@@ -1466,7 +1464,7 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
 
     layout :: Bracketer [Locd (BrackErr + Tok 'Brack)]
     layout = do
-      colon@((_ :@ colonLoc) :> colonIndent) <- MP.satisfy
+      (_ :@ colonLoc) :> colonIndent <- MP.satisfy
         $ (== Layout) . locdItem . indentedItem
       asum
         [ do
@@ -1474,7 +1472,7 @@ bracket srcName tokens = case MP.runParser bracketer name indented of
           let
             -- Calculate the source location just past the end of the last token.
             pastEnd toks = let
-              lastLoc = locdLoc $ last $ last body
+              lastLoc = locdLoc $ last toks
               in lastLoc
                 { locBeginCol = locEndCol lastLoc
                 , locEndCol = succ $ locEndCol lastLoc
@@ -1584,15 +1582,13 @@ reachOffset' locOf splitAt' foldl'' o state =
 
 -- | Parse a stream of bracketed tokens into a program fragment.
 parse :: SrcName -> [Locd (Tok 'Brack)] -> Frag [] 'Parsed
-parse srcName tokens = case MP.runParser parser name tokens of
+parse srcName tokens = case MP.runParser parser (show srcName) tokens of
   Left err -> error $ concat
     [ "internal parsing error: "
     , MP.errorBundlePretty err
     ]
   Right result -> result
   where
-    name :: String
-    name = show srcName
 
     -- <program>
     --   ::= <vocab>*
@@ -1626,11 +1622,11 @@ parse srcName tokens = case MP.runParser parser name tokens of
             VocabAbsBranch name <$> many vocab
           ]
       , do
-        VocabLeaf <$> elem
+        VocabLeaf <$> element
       ]
 
     vocabRelName :: Parser (Vocab 'Rel)
-    vocabRelName = VocabRel . V.fromList <$> namePart `MP.sepBy1` lookup
+    vocabRelName = VocabRel . V.fromList <$> namePart `MP.sepBy1` look
 
     postfixName :: Parser Unqual
     postfixName = extract (S.fromList [ME.Label ('p':|"ostfix name")]) \ case
@@ -1654,14 +1650,14 @@ parse srcName tokens = case MP.runParser parser name tokens of
 
     vocabAbsName :: Parser (Vocab 'Abs)
     vocabAbsName = optional global
-      *> (VocabAbs . V.fromList <$> namePart `MP.sepBy1` lookup)
+      *> (VocabAbs . V.fromList <$> namePart `MP.sepBy1` look)
 
     -- <name>
     --   ::= ("_" "::")? (<name-part> "::")* <name-part>
     unresName :: Parser Unres
     unresName = do
       mGlobal <- optional global
-      prefix <- fmap V.fromList $ many $ MP.try $ namePart <* lookup
+      prefix <- fmap V.fromList $ many $ MP.try $ namePart <* look
       if V.null prefix
         then UnresUnqual <$> (bareName <|> grouped infixName)
         else case mGlobal of
@@ -1676,8 +1672,8 @@ parse srcName tokens = case MP.runParser parser name tokens of
     --     | <type-elem>
     --     | <word-elem>
     --     | <term>
-    elem :: Parser (Elem 'Parsed)
-    elem = asum
+    element :: Parser (Elem 'Parsed)
+    element = asum
       [ InstElem <$> instDef
       , MetaElem <$> metaDef
       , (PermElem ||| PermSynElem) <$> permElem
@@ -1833,7 +1829,7 @@ parse srcName tokens = case MP.runParser parser name tokens of
     instdName = MP.label "instantiated name" $ Instd
       <$> unresName
       <*> (MP.label "type arguments" $ V.fromList . fromMaybe []
-        <$> optional (lookup *> typeList))
+        <$> optional (look *> typeList))
 
     typeList :: Parser [Sig 'Parsed]
     typeList = angled (type_ `MP.sepBy1` match Seq)
@@ -1979,12 +1975,12 @@ parse srcName tokens = case MP.runParser parser name tokens of
         <* (match (AngleEnd ASCII) <|> match (Word (Unqual Infix ">")))
       <|> match (AngleBegin Unicode) *> p <* match (AngleEnd Unicode)
 
-    arrow, ellipsis, global, ignore, lookup :: Parser (Locd (Tok 'Brack))
+    arrow, ellipsis, global, ignore, look :: Parser (Locd (Tok 'Brack))
     arrow = match (Arrow ASCII) <|> match (Arrow Unicode)
     ellipsis = match (Ellipsis ASCII) <|> match (Ellipsis Unicode)
-    global = ignore *> lookup
+    global = ignore *> look
     ignore = match Ignore
-    lookup = match (Lookup ASCII) <|> match (Lookup Unicode)
+    look = match (Look ASCII) <|> match (Look Unicode)
 
     partitionElems :: [Elem 'Parsed] -> Frag [] 'Parsed
     partitionElems = foldr (flip go) emptyFrag
