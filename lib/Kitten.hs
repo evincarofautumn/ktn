@@ -55,7 +55,7 @@ module Kitten
 
 import Control.Applicative (Alternative(..), empty, many, optional, some)
 import Control.Arrow ((|||))
-import Control.Monad (join, mzero)
+import Control.Monad (guard, join, mzero)
 import Data.Char
 import Data.Foldable (asum, toList)
 import Data.Function (on)
@@ -130,6 +130,13 @@ newtype Col = Col Int
 
 colVal :: Col -> Int
 colVal (Col val) = val
+
+-- | A trait constraint.
+data Constraint :: Phase -> Type where
+  Constraint :: !(Name p) -> !(Vector (Sig p)) -> Constraint p
+
+deriving instance (Eq (Name p)) => Eq (Constraint p)
+deriving instance (Show (Name p)) => Show (Constraint p)
 
 -- | A top-level program element.
 data Elem :: Phase -> Type where
@@ -368,9 +375,10 @@ deriving instance (Show (Name p)) => Show (Instd p)
 -- | An instance definition.
 data InstDef :: Phase -> Type where
   InstDef ::
-    { instName :: !(Name p)
-    , instSig :: !(Sig p)
-    , instBody :: !(Maybe (Term p))
+    { instDefLoc :: !Loc
+    , instDefName :: !(Name p)
+    , instDefSig :: !(Sig p)
+    , instDefBody :: !(Maybe (Term p))
     } -> InstDef p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (InstDef p)
@@ -534,8 +542,14 @@ type Parser = MP.Parsec Void [Locd (Tok 'Brack)]
 
 -- | The definition of a permission.
 data PermDef :: Phase -> Type where
-  PermDef :: PermDef p
-  deriving (Eq, Show)
+  PermDef ::
+    { permDefLoc :: !Loc
+    , permDefName :: !(Name p)
+    , permDefOf :: !(Maybe (Term p))
+    } -> PermDef p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (PermDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (PermDef p)
 
 data Permit :: Phase -> Type where
   Grant :: !(Name p) -> Permit p
@@ -546,8 +560,14 @@ deriving instance (Show (Name p)) => Show (Permit p)
 
 -- | The definition of a permission synonym.
 data PermSyn :: Phase -> Type where
-  PermSyn :: PermSyn p
-  deriving (Eq, Show)
+  PermSyn ::
+    { permSynLoc :: !Loc
+    , permSynName :: !(Name p)
+    , permSynOf :: !(Vector (Permit p))
+    } -> PermSyn p
+
+deriving instance (Eq (Name p)) => Eq (PermSyn p)
+deriving instance (Show (Name p)) => Show (PermSyn p)
 
 -- | The compiler phase, which determines the representation of 'Term's.
 data Phase :: Type where
@@ -1076,13 +1096,26 @@ type Tokenizer = MP.Parsec Void Text
 
 -- | The definition of a trait.
 data TraitDef :: Phase -> Type where
-  TraitDef :: TraitDef p
-  deriving (Eq, Show)
+  TraitDef ::
+    { traitDefLoc :: !Loc
+    , traitDefName :: !(Name p)
+    , traitDefSig :: !(Sig p)
+    , traitDefBody :: !(Maybe (Term p))
+    } -> TraitDef p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (TraitDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (TraitDef p)
 
 -- | The definition of a trait synonym.
 data TraitSyn :: Phase -> Type where
-  TraitSyn :: TraitSyn p
-  deriving (Eq, Show)
+  TraitSyn ::
+    { traitSynLoc :: !Loc
+    , traitSynName :: !(Name p)
+    , traitSynOf :: !(Vector (Constraint p))
+    } -> TraitSyn p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (TraitSyn p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (TraitSyn p)
 
 -- | A type variable in a type.
 newtype TVar = TVar (Var 'Renamed)
@@ -1736,7 +1769,9 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     --   ::= "instance" <qual> <sig> "{" <term>* "}"
     --     | "instance" <qual> <sig> ";"
     instDef :: Parser (InstDef 'Parsed)
-    instDef = mzero  -- error "TODO: instDef"
+    instDef = MP.label "instance definition" do
+      _ :@ loc <- match KwdInstance
+      InstDef loc <$> unresName <*> signature <*> optBlocked expr
 
     -- <meta-def>
     --   ::= "about" <qual> "{" <kvp>* "}"
@@ -1759,7 +1794,19 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     -- <perm-syn>
     --   ::= "permission" "synonym" <qual> "(" <permit>* ")" ";"
     permElem :: Parser (PermDef 'Parsed + PermSyn 'Parsed)
-    permElem = mzero  -- error "TODO: permElem"
+    permElem = do
+      _ :@ loc <- match KwdPermission
+      match KwdSynonym *> (Right <$> permSyn loc) <|> Left <$> permDef loc
+      where
+
+        permSyn :: Loc -> Parser (PermSyn 'Parsed)
+        permSyn loc = MP.label "permission synonym"
+          $ PermSyn loc <$> unresName
+            <*> (V.fromList <$> grouped (many permit))
+
+        permDef :: Loc -> Parser (PermDef 'Parsed)
+        permDef loc = MP.label "permission definition"
+          $ PermDef loc <$> unresName <*> optBlocked expr
 
     -- <trait-elem>
     --   ::= <trait-def>
@@ -1772,7 +1819,25 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     -- <trait-syn>
     --   ::= "trait" "synonym" <qual> "(" seq(<app-sig>) ")" ";"
     traitElem :: Parser (TraitDef 'Parsed + TraitSyn 'Parsed)
-    traitElem = mzero  -- error "TODO: traitElem"
+    traitElem = do
+      _ :@ loc <- match KwdTrait
+      match KwdSynonym *> (Right <$> traitSyn loc) <|> Left <$> traitDef loc
+      where
+
+        traitSyn :: Loc -> Parser (TraitSyn 'Parsed)
+        traitSyn loc = MP.label "trait synonym"
+          $ TraitSyn loc <$> unresName
+            <*> (V.fromList <$> grouped (traitApp `MP.sepEndBy` match Seq))
+
+        traitDef :: Loc -> Parser (TraitDef 'Parsed)
+        traitDef loc = MP.label "trait definition"
+          $ TraitDef loc <$> unresName <*> signature <*> optBlocked expr
+
+    traitApp :: Parser (Constraint 'Parsed)
+    traitApp = MP.label "trait constraint" do
+      (prefix, suffixes) <- appType unresName
+      guard (not (null suffixes))
+      pure $ Constraint prefix (V.fromList suffixes)
 
     -- <type-elem>
     --   ::= <type-def>
@@ -1798,15 +1863,16 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     wordElem :: Parser (WordDef 'Parsed + WordSyn 'Parsed)
     wordElem = Left <$> wordDef <|> Right <$> wordSyn
       where
-        wordDef = do
+
+        wordDef :: Parser (WordDef 'Parsed)
+        wordDef = MP.label "word definition" do
           _ :@ loc <- match KwdDefine
           WordDef loc <$> unresName <*> signature <*> blocked expr
 
-        wordSyn = do
+        wordSyn :: Parser (WordSyn 'Parsed)
+        wordSyn = MP.label "word synonym" do
           _ :@ loc <- match KwdSynonym
-          WordSyn loc
-            <$> unresName
-            <*> optional quant
+          WordSyn loc <$> unresName <*> optional quant
             <*> (grouped instdName <* match Term)
 
     signature :: Parser (Sig 'Parsed)
@@ -1857,7 +1923,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
 
     basicType :: Parser (Sig 'Parsed)
     basicType = MP.label "basic type" do
-      prefix <- asum
+      (prefix, suffixes) <- appType $ asum
         [ quantified $ grouped type_
         , MP.try do
           loc <- getSourceLoc
@@ -1865,9 +1931,14 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
           pure $ VarSig loc name
         , grouped type_
         ]
-      let apply a b = AppSig ((a ^. location) <> (b ^. location)) a b
-      suffixes <- concat <$> many typeList
-      pure $ foldl' apply prefix suffixes
+      pure $ foldl' applyTypes prefix suffixes
+
+    applyTypes :: Sig p -> Sig p -> Sig p
+    applyTypes ty args = AppSig ((ty ^. location) <> (args ^. location)) ty args
+
+    appType :: Parser a -> Parser (a, [Sig 'Parsed])
+    appType ty = MP.label "type application"
+      $ (,) <$> ty <*> (concat <$> many typeList)
 
     type_ :: Parser (Sig 'Parsed)
     type_ = MP.label "type" $ MP.try functionType <|> basicType
@@ -2013,6 +2084,9 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
 
     blocked :: Parser a -> Parser a
     blocked = (match BlockBegin *>) . (<* match BlockEnd)
+
+    optBlocked :: Parser a -> Parser (Maybe a)
+    optBlocked p = Nothing <$ match Term <|> Just <$> blocked p
 
     bracketed :: Parser a -> Parser a
     bracketed = (match ListBegin *>) . (<* match ListEnd)
