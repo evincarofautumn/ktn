@@ -45,8 +45,12 @@ module Kitten
   , WordDef(..)
   , type (+)
   , bracket
+  , colVal
   , emptyFrag
+  , locdItem
+  , locdLoc
   , parse
+  , rowVal
   , tokenize
   ) where
 
@@ -71,7 +75,7 @@ import GHC.Exts (IsString)
 import GHC.Types (Type)
 import Lens.Micro ((^.), Lens')
 import Text.PrettyPrint.HughesPJClass (Pretty(..))
-import Text.Read (readMaybe)
+import Text.Read (Read(..), readMaybe)
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.Text as T
@@ -80,7 +84,9 @@ import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
 import qualified Text.Megaparsec.Error as ME
+import qualified Text.ParserCombinators.ReadPrec as RP
 import qualified Text.PrettyPrint as PP
+import qualified Text.Read as TR
 
 -- | The type of annotations in the given compiler phase.
 type family Anno (phase :: Phase) :: Type where
@@ -125,8 +131,11 @@ data CharLit :: Type where
   deriving (Eq, Ord, Show)
 
 -- | A column in a source location.
-newtype Col = Col { colVal :: Int }
-  deriving (Enum, Eq, Ord, Show)
+newtype Col = Col Int
+  deriving (Enum, Eq, Ord, Read, Show)
+
+colVal :: Col -> Int
+colVal (Col val) = val
 
 -- | A top-level program element.
 data Elem :: Phase -> Type where
@@ -416,7 +425,39 @@ data Loc :: Type where
     , locEndRow :: !Row
     , locEndCol :: !Col
     } -> Loc
-  deriving (Eq, Show)
+  deriving (Eq)
+
+data Loc' :: Type where
+  Loc' :: !SrcName -> !Row -> !Col -> !Row -> !Col -> Loc'
+  deriving (Read)
+
+-- | Copied from its derived implementation as if it were defined using
+-- positional syntax instead of record notation.
+instance Show Loc where
+  showsPrec p (Loc name beginRow beginCol endRow endCol)
+    = showParen (p >= 11)
+    $ showString "Loc "
+    . showsPrec 11 name
+    . showChar ' '
+    . showsPrec 11 beginRow
+    . showChar ' '
+    . showsPrec 11 beginCol
+    . showChar ' '
+    . showsPrec 11 endRow
+    . showChar ' '
+    . showsPrec 11 endCol
+
+-- | Copied from its derived implementation as if it were defined using
+-- positional syntax instead of record notation.
+instance Read Loc where
+  readPrec = TR.parens $ RP.prec 10 $ do
+    TR.Ident "Loc" <- TR.lexP
+    name <- RP.step readPrec
+    beginRow <- RP.step readPrec
+    beginCol <- RP.step readPrec
+    endRow <- RP.step readPrec
+    endCol <- RP.step readPrec
+    return $ Loc name beginRow beginCol endRow endCol
 
 class HasLoc a where
   location :: Lens' a Loc
@@ -463,13 +504,16 @@ data Local :: Type where
 
 -- | A value decorated with a source location.
 data Locd :: Type -> Type where
-  (:@) ::
-    { locdItem :: a
-    , locdLoc :: !Loc
-    } -> Locd a
-  deriving (Eq, Functor, Ord, Show)
+  (:@) :: a -> !Loc -> Locd a
+  deriving (Eq, Functor, Ord, Read, Show)
 
 infixl 7 :@
+
+locdItem :: Locd a -> a
+locdItem (x :@ _) = x
+
+locdLoc :: Locd a -> Loc
+locdLoc (_ :@ loc) = loc
 
 instance (Pretty a) => Pretty (Locd a) where
   pPrint = pPrint . locdItem
@@ -552,8 +596,11 @@ data Root :: Type where
   deriving (Show)
 
 -- | A row in a source location.
-newtype Row = Row { rowVal :: Int }
-  deriving (Eq, Ord, Show)
+newtype Row = Row Int
+  deriving (Eq, Ord, Read, Show)
+
+rowVal :: Row -> Int
+rowVal (Row val) = val
 
 -- | A parsed type signature.
 data Sig :: Phase -> Type where
