@@ -183,7 +183,7 @@ spec = do
         "header:\n\
         \  contents\n\
         \\&"
-        `shouldBe` Right <$>
+        `shouldBe`
         [ Word $ Unqual Postfix "header"
         , BlockBegin
         , Word $ Unqual Postfix "contents"
@@ -199,7 +199,7 @@ spec = do
         \  inner2:\n\
         \    contents\n\
         \\&"
-        `shouldBe` Right <$>
+        `shouldBe`
         [ Word $ Unqual Postfix "outer"
         , BlockBegin
         , Word $ Unqual Postfix "inner1"
@@ -228,7 +228,7 @@ spec = do
         \    line3\n\
         \    line3\n\
         \\&"
-        `shouldBe` Right <$>
+        `shouldBe`
         [ Word (Unqual Postfix "header")
         , BlockBegin
         , Word (Unqual Postfix "line1")
@@ -264,7 +264,7 @@ spec = do
         \    line4\n\
         \      line4\n\
         \\&"
-        `shouldBe` Right <$>
+        `shouldBe`
         [ Word $ Unqual Postfix "outer"
         , BlockBegin
         , Word $ Unqual Postfix "inner1"
@@ -293,32 +293,37 @@ spec = do
         ]
 
     it "raises error on empty layout block at end of input" do
-      locdItem <$> testLayout
+      testLayout
         "header:\n\
         \\&"
         `shouldBe`
-        [ Right $ Word $ Unqual Postfix "header"
-        , Left $ BrackErr
-          ("" :@ Loc testName (Row 1) (Col 10) (Row 1) (Col 10))
-          "empty layout block"
+        [ Word (Unqual Postfix "header")
+          :@ Loc testName (Row 1) (Col 1) (Row 1) (Col 7)
+        , BrackErr "" "empty layout block"
+          :@ Loc testName (Row 1) (Col 10) (Row 1) (Col 10)
         ]
 
     it "raises error on empty layout block" do
-      locdItem <$> testLayout
+      testLayout
         "header1:\n\
         \header2:\n\
         \  contents\n\
         \\&"
         `shouldBe`
-        [ Right $ Word $ Unqual Postfix "header1"
-        , Left $ BrackErr
-          ("" :@ Loc testName (Row 1) (Col 11) (Row 1) (Col 11))
-          "empty layout block"
-        , Right $ Word $ Unqual Postfix "header2"
-        , Right BlockBegin
-        , Right $ Word $ Unqual Postfix "contents"
-        , Right Term
-        , Right BlockEnd
+        [ Word (Unqual Postfix "header1")
+          :@ Loc testName (Row 1) (Col 1) (Row 1) (Col 8)
+        , BrackErr "" "empty layout block"
+          :@ Loc testName (Row 1) (Col 11) (Row 1) (Col 11)
+        , Word (Unqual Postfix "header2")
+          :@ Loc testName (Row 2) (Col 1) (Row 2) (Col 8)
+        , BlockBegin
+          :@ Loc testName (Row 2) (Col 8) (Row 2) (Col 9)
+        , Word (Unqual Postfix "contents")
+          :@ Loc testName (Row 3) (Col 3) (Row 3) (Col 11)
+        , Term
+          :@ Loc testName (Row 3) (Col 11) (Row 3) (Col 11)
+        , BlockEnd
+          :@ Loc testName (Row 3) (Col 11) (Row 3) (Col 11)
         ]
 
   describe "parsing" do
@@ -473,9 +478,8 @@ testTokenizeRow row = tokenize testName row
 testName :: SrcName
 testName = TextName "test"
 
-testLayout :: Text -> [Locd (BrackErr + Tok 'Brack)]
+testLayout :: Text -> [Locd (Tok 'Brack)]
 testLayout = bracket testName . testTokenize
 
 testParse :: Text -> Frag [] 'Parsed
-testParse input = parse testName
-  [tok :@ loc | Right tok :@ loc <- testLayout input]
+testParse = parse testName . testLayout

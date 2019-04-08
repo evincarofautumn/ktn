@@ -20,8 +20,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Kitten
-  ( BrackErr(..)
-  , Col(..)
+  ( Col(..)
   , Enc(..)
   , ErrMsg(..)
   , Fixity(..)
@@ -116,11 +115,6 @@ data TokPhase :: Type where
   Unbrack :: TokPhase
   Brack :: TokPhase
   deriving (Show)
-
--- | An indentation error.
-data BrackErr :: Type where
-  BrackErr :: !(Locd Text) -> !ErrMsg -> BrackErr
-  deriving (Eq, Show)
 
 -- | A bracket inserter.
 type Bracketer = MP.Parsec Void [Indented (Locd (Tok 'Unbrack))]
@@ -999,7 +993,14 @@ data Tok :: TokPhase -> Type where
   -- TODO: Add a flag to disable this constructor to exclude errors.
   TokErr :: !Text -> !ErrMsg -> Tok b
 
-  deriving (Eq, Ord, Show)
+  -- | An indentation error.
+  --
+  -- TODO: Add a flag to disable this constructor to exclude errors.
+  BrackErr :: !Text -> !ErrMsg -> Tok 'Brack
+
+deriving instance Eq (Tok b)
+deriving instance Ord (Tok b)
+deriving instance Show (Tok b)
 
 instance Pretty (Tok b) where
   pPrint = \ case
@@ -1066,6 +1067,8 @@ instance Pretty (Tok b) where
     Text Unicode lit -> PP.hcat ["\x201C", "..." {- pPrint lit -}, "\x201D"]
     Word name -> pPrint name
     TokErr src (ErrMsg msg) -> PP.hcat
+      [PP.text $ T.unpack src, " /*", PP.text $ T.unpack msg, "*/"]
+    BrackErr src (ErrMsg msg) -> PP.hcat
       [PP.text $ T.unpack src, " /*", PP.text $ T.unpack msg, "*/"]
 
 -- | A character tokenizer.
@@ -1397,7 +1400,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
 -- Note that if a block uses explicit braces, its contents are /not/ interpreted
 -- as folded lines, and no terminators will be inserted.
 --
-bracket :: SrcName -> [Locd (Tok 'Unbrack)] -> [Locd (BrackErr + Tok 'Brack)]
+bracket :: SrcName -> [Locd (Tok 'Unbrack)] -> [Locd (Tok 'Brack)]
 bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
   Left err -> error $ concat
     [ "internal bracketing error: "
@@ -1410,15 +1413,15 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
     indents = locBeginCol . locdLoc . head <$> rows
     rows = groupBy ((==) `on` locBeginRow . locdLoc) tokens
 
-    bracketer :: Bracketer [Locd (BrackErr + Tok 'Brack)]
+    bracketer :: Bracketer [Locd (Tok 'Brack)]
     bracketer = concat <$> many item <* MP.eof
 
-    item :: Bracketer [Locd (BrackErr + Tok 'Brack)]
+    item :: Bracketer [Locd (Tok 'Brack)]
     item = itemWhere $ const True
 
     itemWhere
       :: (Indented (Locd (Tok 'Unbrack)) -> Bool)
-      -> Bracketer [Locd (BrackErr + Tok 'Brack)]
+      -> Bracketer [Locd (Tok 'Brack)]
     itemWhere p = MP.try (MP.lookAhead (MP.satisfy p)) *> asum
       [ between (ArrayBegin ASCII) (ArrayEnd ASCII)
       , between (ArrayBegin Unicode) (ArrayEnd Unicode)
@@ -1431,68 +1434,68 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
       , pure <$> (fromUnbrack . indentedItem =<< MP.satisfy nonbracket)
       ]
 
-    between :: Tok 'Unbrack -> Tok 'Unbrack -> Bracketer [Locd (BrackErr + Tok 'Brack)]
+    between :: Tok 'Unbrack -> Tok 'Unbrack -> Bracketer [Locd (Tok 'Brack)]
     between open close = do
       begin <- fromUnbrack . indentedItem =<< MP.satisfy ((== open) . locdItem . indentedItem)
       inner <- concat <$> many item
       end <- fromUnbrack . indentedItem =<< MP.satisfy ((== close) . locdItem . indentedItem)
       pure (begin : inner ++ [end])
 
-    fromUnbrack :: Locd (Tok 'Unbrack) -> Bracketer (Locd (BrackErr + Tok 'Brack))
+    fromUnbrack :: Locd (Tok 'Unbrack) -> Bracketer (Locd (Tok 'Brack))
     fromUnbrack (tok :@ loc) = (:@ loc) <$> case tok of
-      KwdAbout -> pure $ Right KwdAbout
-      KwdAs -> pure $ Right KwdAs
-      KwdCase -> pure $ Right KwdCase
-      KwdDefine -> pure $ Right KwdDefine
-      KwdDo -> pure $ Right KwdDo
-      KwdElif -> pure $ Right KwdElif
-      KwdElse -> pure $ Right KwdElse
-      KwdExport -> pure $ Right KwdExport
-      KwdIf -> pure $ Right KwdIf
-      KwdImport -> pure $ Right KwdImport
-      KwdInstance -> pure $ Right KwdInstance
-      KwdIntrinsic -> pure $ Right KwdIntrinsic
-      KwdJump -> pure $ Right KwdJump
-      KwdMatch -> pure $ Right KwdMatch
-      KwdLoop -> pure $ Right KwdLoop
-      KwdPermission -> pure $ Right KwdPermission
-      KwdReturn -> pure $ Right KwdReturn
-      KwdSynonym -> pure $ Right KwdSynonym
-      KwdTrait -> pure $ Right KwdTrait
-      KwdType -> pure $ Right KwdType
-      KwdVocab -> pure $ Right KwdVocab
-      KwdWith -> pure $ Right KwdWith
-      AngleBegin enc -> pure $ Right $ AngleBegin enc
-      AngleEnd enc -> pure $ Right $ AngleEnd enc
-      ArrayBegin enc -> pure $ Right $ ArrayBegin enc
-      ArrayEnd enc -> pure $ Right $ ArrayEnd enc
-      Arrow enc -> pure $ Right $ Arrow enc
-      BlockBegin -> pure $ Right BlockBegin
-      BlockEnd -> pure $ Right BlockEnd
-      Ellipsis enc -> pure $ Right $ Ellipsis enc
-      GroupBegin -> pure $ Right $ GroupBegin
-      GroupEnd -> pure $ Right GroupEnd
-      Ignore -> pure $ Right Ignore
-      Layout -> pure $ Left $ BrackErr
-        (T.pack (PP.render $ pPrint tok) :@ loc)
+      KwdAbout -> pure KwdAbout
+      KwdAs -> pure KwdAs
+      KwdCase -> pure KwdCase
+      KwdDefine -> pure KwdDefine
+      KwdDo -> pure KwdDo
+      KwdElif -> pure KwdElif
+      KwdElse -> pure KwdElse
+      KwdExport -> pure KwdExport
+      KwdIf -> pure KwdIf
+      KwdImport -> pure KwdImport
+      KwdInstance -> pure KwdInstance
+      KwdIntrinsic -> pure KwdIntrinsic
+      KwdJump -> pure KwdJump
+      KwdMatch -> pure KwdMatch
+      KwdLoop -> pure KwdLoop
+      KwdPermission -> pure KwdPermission
+      KwdReturn -> pure KwdReturn
+      KwdSynonym -> pure KwdSynonym
+      KwdTrait -> pure KwdTrait
+      KwdType -> pure KwdType
+      KwdVocab -> pure KwdVocab
+      KwdWith -> pure KwdWith
+      AngleBegin enc -> pure $ AngleBegin enc
+      AngleEnd enc -> pure $ AngleEnd enc
+      ArrayBegin enc -> pure $ ArrayBegin enc
+      ArrayEnd enc -> pure $ ArrayEnd enc
+      Arrow enc -> pure $ Arrow enc
+      BlockBegin -> pure BlockBegin
+      BlockEnd -> pure BlockEnd
+      Ellipsis enc -> pure $ Ellipsis enc
+      GroupBegin -> pure $ GroupBegin
+      GroupEnd -> pure GroupEnd
+      Ignore -> pure Ignore
+      Layout -> pure $ BrackErr
+        (T.pack (PP.render $ pPrint tok))
         "start of invalid layout block"
-      ListBegin -> pure $ Right ListBegin
-      ListEnd -> pure $ Right ListEnd
-      Look enc -> pure $ Right $ Look enc
-      Quote -> pure $ Right Quote
-      Ref -> pure $ Right Ref
-      Seq -> pure $ Right Seq
-      Splice -> pure $ Right Splice
-      Term -> pure $ Right Term
-      UnboxedBegin enc -> pure $ Right $ UnboxedBegin enc
-      UnboxedEnd enc -> pure $ Right $ UnboxedEnd enc
-      Char enc lit -> pure $ Right $ Char enc lit
-      Float lit -> pure $ Right $ Float lit
-      Integer lit -> pure $ Right $ Integer lit
-      Para enc lit -> pure $ Right $ Para enc lit
-      Text enc lit -> pure $ Right $ Text enc lit
-      Word name -> pure $ Right $ Word name
-      TokErr src msg -> pure $ Right $ TokErr src msg
+      ListBegin -> pure ListBegin
+      ListEnd -> pure ListEnd
+      Look enc -> pure $ Look enc
+      Quote -> pure Quote
+      Ref -> pure Ref
+      Seq -> pure Seq
+      Splice -> pure Splice
+      Term -> pure Term
+      UnboxedBegin enc -> pure $ UnboxedBegin enc
+      UnboxedEnd enc -> pure $ UnboxedEnd enc
+      Char enc lit -> pure $ Char enc lit
+      Float lit -> pure $ Float lit
+      Integer lit -> pure $ Integer lit
+      Para enc lit -> pure $ Para enc lit
+      Text enc lit -> pure $ Text enc lit
+      Word name -> pure $ Word name
+      TokErr src msg -> pure $ TokErr src msg
 
     nonbracket :: Indented (Locd (Tok 'Unbrack)) -> Bool
     nonbracket = not . (`elem` bracks') . locdItem . indentedItem
@@ -1511,7 +1514,7 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
       , (UnboxedBegin Unicode, UnboxedEnd Unicode)
       ]
 
-    layout :: Bracketer [Locd (BrackErr + Tok 'Brack)]
+    layout :: Bracketer [Locd (Tok 'Brack)]
     layout = do
       (_ :@ colonLoc) :> colonIndent <- MP.satisfy
         $ (== Layout) . locdItem . indentedItem
@@ -1527,19 +1530,18 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
             endLoc = pastEnd $ concat body
             body' = concat $ (\ line -> let
               termLoc = pastEnd line
-              in line ++ [Right Term :@ termLoc]) <$> body
-          pure $ (Right BlockBegin :@ colonLoc) : body' ++ [Right BlockEnd :@ endLoc]
+              in line ++ [Term :@ termLoc]) <$> body
+          pure $ (BlockBegin :@ colonLoc) : body' ++ [BlockEnd :@ endLoc]
         -- A layout block always consumes a colon before yielding a tombstone
         -- for an empty layout block; if this were in 'itemWhere', it would
         -- always produce an error tombstone, leading to an infinite loop since
         -- it's called from 'many' and consumes no input.
         , do
           loc <- getSourceLoc
-          pure $ pure $ (:@ loc)
-            $ Left $ BrackErr ("" :@ loc) "empty layout block"
+          pure $ pure $ (:@ loc) $ BrackErr "" "empty layout block"
         ]
 
-    layoutLine :: Col -> Bracketer [Locd (BrackErr + Tok 'Brack)]
+    layoutLine :: Col -> Bracketer [Locd (Tok 'Brack)]
     layoutLine colonIndent = do
       (first@(_ :@ firstLoc) :> _) <- MP.satisfy
         $ (> colonIndent) . locBeginCol . locdLoc . indentedItem
