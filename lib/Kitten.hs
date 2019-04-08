@@ -1522,10 +1522,8 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
             -- Calculate the source location just past the end of the last token.
             pastEnd toks = let
               lastLoc = locdLoc $ last toks
-              in lastLoc
-                { locBeginCol = locEndCol lastLoc
-                , locEndCol = succ $ locEndCol lastLoc
-                }
+              lastCol = locEndCol lastLoc
+              in lastLoc { locBeginCol = lastCol, locEndCol = lastCol }
             endLoc = pastEnd $ concat body
             body' = concat $ (\ line -> let
               termLoc = pastEnd line
