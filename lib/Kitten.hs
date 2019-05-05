@@ -20,15 +20,19 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Kitten
-  ( Col(..)
+  ( CaseDef(..)
+  , CaseFields(..)
+  , Col(..)
   , Enc(..)
   , ErrMsg(..)
   , Fixity(..)
   , Frag(..)
   , Indented(..)
+  , InstDef(..)
   , Kind(..)
   , Loc(..)
   , Locd(..)
+  , PermDef(..)
   , Permit(..)
   , Phase(..)
   , Quant(..)
@@ -38,6 +42,8 @@ module Kitten
   , Term(..)
   , Tok(..)
   , TokPhase(..)
+  , TraitDef(..)
+  , TypeDef(..)
   , Unqual(..)
   , Unres(..)
   , Var(..)
@@ -55,7 +61,7 @@ module Kitten
 
 import Control.Applicative (Alternative(..), empty, many, optional, some)
 import Control.Arrow ((|||))
-import Control.Monad (guard, join, mzero)
+import Control.Monad (guard, join, mzero, void)
 import Data.Char
 import Data.Foldable (asum, toList)
 import Data.Function (on)
@@ -118,6 +124,28 @@ data TokPhase :: Type where
 
 -- | A bracket inserter.
 type Bracketer = MP.Parsec Void [Indented (Locd (Tok 'Unbrack))]
+
+-- | The definition of a constructor of a type.
+data CaseDef :: Phase -> Type where
+  CaseDef ::
+    { caseDefLoc :: !Loc
+    , caseDefName :: !Unqual
+    , caseDefQuant :: !(Maybe (Quant p))
+    , caseDefFields :: !(Maybe (CaseFields p))
+    } -> CaseDef p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (CaseDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (CaseDef p)
+
+-- | The fields of a constructor.
+--
+-- TODO: Include flag for trailing comma?
+data CaseFields :: Phase -> Type where
+  AnonFields :: !Loc -> !(Vector (Sig p)) -> CaseFields p
+  NamedFields :: !Loc -> !(Vector (Unqual, Sig p)) -> CaseFields p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (CaseFields p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (CaseFields p)
 
 -- | The contents of a character literal.
 data CharLit :: Type where
@@ -545,7 +573,7 @@ data PermDef :: Phase -> Type where
   PermDef ::
     { permDefLoc :: !Loc
     , permDefName :: !(Name p)
-    , permDefOf :: !(Maybe (Term p))
+    , permDefBody :: !(Maybe (Term p))
     } -> PermDef p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (PermDef p)
@@ -1134,13 +1162,26 @@ data Ty :: Type where
 
 -- | The definition of a type.
 data TypeDef :: Phase -> Type where
-  TypeDef :: TypeDef p
-  deriving (Eq, Show)
+  TypeDef ::
+    { typeDefLoc :: !Loc
+    , typeDefName :: !(Name p)
+    , typeDefQuant :: !(Maybe (Quant p))
+    , typeDefCases :: !(Vector (CaseDef p))
+    } -> TypeDef p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (TypeDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (TypeDef p)
 
 -- | The definition of a type synonym.
 data TypeSyn :: Phase -> Type where
-  TypeSyn :: TypeSyn p
-  deriving (Eq, Show)
+  TypeSyn ::
+    { typeSynLoc :: !Loc
+    , typeSynName :: !(Name p)
+    , typeSynOf :: !(Sig p)
+    } -> TypeSyn p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (TypeSyn p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (TypeSyn p)
 
 -- | An unqualified name. The 'Fixity' indicates whether it's a word name
 -- ('Postfix') or operator name ('Infix'). Note that this doesn't reflect how
@@ -1849,7 +1890,44 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     -- <type-syn>
     --   ::= "type" "synonym" <qual> <quant>? "(" <sig> ")" ";"
     typeElem :: Parser (TypeDef 'Parsed + TypeSyn 'Parsed)
-    typeElem = mzero  -- error "TODO: typeElem"
+    typeElem = do
+      _ :@ loc <- match KwdType
+      match KwdSynonym *> (Right <$> typeSyn loc) <|> Left <$> typeDef loc
+      where
+
+        typeSyn :: Loc -> Parser (TypeSyn 'Parsed)
+        typeSyn loc = MP.label "type synonym"
+          $ TypeSyn loc <$> unresName <*> grouped signature <* match Term
+
+        typeDef :: Loc -> Parser (TypeDef 'Parsed)
+        typeDef loc = MP.label "type definition"
+          $ TypeDef loc <$> unresName <*> optional quant
+            <*> (maybe mempty V.fromList
+              <$> optBlocked (caseDef `MP.sepEndBy` match Term))
+
+        caseDef :: Parser (CaseDef 'Parsed)
+        caseDef = MP.label "case definition"
+          $ CaseDef <$> (locdLoc <$> match KwdCase) <*> bareName
+            <*> optional quant <*> optional fields
+
+        fields :: Parser (CaseFields 'Parsed)
+        fields = asum
+          [ MP.label "anonymous field list" do
+            _ :@ beginLoc <- match GroupBegin
+            sigs <- (basicType <|> signature) `MP.sepEndBy` match Seq
+            _ :@ endLoc <- match GroupEnd
+            pure $ AnonFields (beginLoc <> endLoc) $ V.fromList sigs
+          , MP.label "named field block" do
+            _ :@ beginLoc <- match BlockBegin
+            sigs <- V.fromList <$> field `MP.sepEndBy` match Term
+            _ :@ endLoc <- match BlockEnd
+            pure $ NamedFields (beginLoc <> endLoc) sigs
+          ]
+          where
+            field :: Parser (Unqual, Sig 'Parsed)
+            field = (,)
+              <$> (postfixName <* match KwdAs)
+              <*> (basicType <|> signature)
 
     -- <word-elem>
     --   ::= <word-def>
@@ -1924,7 +2002,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     basicType :: Parser (Sig 'Parsed)
     basicType = MP.label "basic type" do
       (prefix, suffixes) <- appType $ asum
-        [ quantified $ grouped type_
+        [ quantified (basicType <|> grouped type_)
         , MP.try do
           loc <- getSourceLoc
           name <- unresName
@@ -1952,7 +2030,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
         <$> optional (look *> typeList))
 
     typeList :: Parser [Sig 'Parsed]
-    typeList = angled (type_ `MP.sepBy1` match Seq)
+    typeList = angled (type_ `MP.sepEndBy1` match Seq)
 
     quant :: Parser (Quant 'Parsed)
     quant = MP.label "quantifier" do
@@ -1961,8 +2039,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
       MP.label "universal quantifier" (Forall loc <$> angled vars)
         <|> MP.label "existential quantifier" (Exists loc <$> bracketed vars)
       where
-        -- TODO: Insert tombstone if there are no vars?
-        vars = V.fromList <$> (var `MP.sepBy` match Seq)
+        vars = V.fromList <$> (var `MP.sepEndBy1` match Seq)
 
     quantified :: Parser (Sig 'Parsed) -> Parser (Sig 'Parsed)
     quantified p = do
@@ -2017,7 +2094,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
               pure (name, foldr1 FunKind kinds)
             , do
               params <- fmap snd . fromMaybe [] <$> optional
-                (angled (var' (() <$ ignore <|> () <$ postfixName) `MP.sepBy1` match Seq))
+                (angled (var' (void ignore <|> void postfixName) `MP.sepEndBy1` match Seq))
               let kind = fromMaybe ValueKind sigil
               pure (name, foldr FunKind kind params)
             ]
