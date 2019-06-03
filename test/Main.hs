@@ -1,5 +1,6 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeOperators #-}
@@ -11,6 +12,7 @@ import Data.Text (Text)
 import Kitten
 import Test.HUnit
 import Test.Hspec
+import qualified Data.Map as M
 import qualified Data.Vector as V
 
 main :: IO ()
@@ -864,6 +866,102 @@ spec = do
                 (Just (AnonFields _ (V.toList -> [])))
               , CaseDef _ (Unqual Postfix "ctor6") Nothing Nothing
               ]
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty metadata about word" do
+      case testParse
+        "about test {}\n\
+        \\&" of
+        Frag
+          { fragMetas = [MetaDef
+            { metaDefTag = WordTag
+            , metaDefName = UnresUnqual (Unqual Postfix "test")
+            , metaDefQuant = Nothing
+            , metaDefData = M.toList -> []
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty metadata about type" do
+      case testParse
+        "about type Int32 {}\n\
+        \\&" of
+        Frag
+          { fragMetas = [MetaDef
+            { metaDefTag = TypeTag
+            , metaDefName = UnresUnqual (Unqual Postfix "Int32")
+            , metaDefQuant = Nothing
+            , metaDefData = M.toList -> []
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses metadata about type with quantifier" do
+      case testParse
+        "about type Optional<T>:\n\
+        \  kitten::tests {}\n\
+        \\&" of
+        Frag
+          { fragMetas = [MetaDef
+            { metaDefTag = TypeTag
+            , metaDefName = UnresUnqual (Unqual Postfix "Optional")
+            , metaDefQuant = Just (Forall _
+              (V.toList -> [Var (Unqual Postfix "T") ValueKind]))
+            , metaDefData = M.toList -> [(Qual
+              (VocabAbs (V.toList -> [Unqual Postfix "kitten"]))
+              (Unqual Postfix "tests"), Identity{})]
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses metadata about permission with various keys" do
+      case testParse
+        "about permission P:\n\
+        \  a::b {}\n\
+        \  _::c::d {}\n\
+        \  e {}\n\
+        \\&" of
+        Frag
+          { fragMetas = [MetaDef
+            { metaDefTag = PermTag
+            , metaDefName = UnresUnqual (Unqual Postfix "P")
+            , metaDefQuant = Nothing
+            , metaDefData = M.toList ->
+              [ ( Qual
+                  (VocabAbs (V.toList -> [Unqual Postfix "a"]))
+                  (Unqual Postfix "b")
+                , Identity{}
+                )
+              , ( Qual
+                  (VocabAbs (V.toList -> [Unqual Postfix "c"]))
+                  (Unqual Postfix "d")
+                , Identity{}
+                )
+              , ( Qual
+                  (VocabAbs (V.toList -> []))
+                  (Unqual Postfix "e")
+                , Identity{}
+                )
+              ]
+            }]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses metadata about vocab" do
+      case testParse
+        "about vocab kitten:\n\
+        \  kitten::docs {}\n\
+        \\&" of
+        Frag
+          { fragMetas = [MetaDef
+            { metaDefTag = VocabTag
+            , metaDefName = UnresUnqual (Unqual Postfix "kitten")
+            , metaDefQuant = Nothing
+            , metaDefData = M.toList -> [(Qual
+              (VocabAbs (V.toList -> [Unqual Postfix "kitten"]))
+              (Unqual Postfix "docs"), Identity{})]
             }]
           } -> pure ()
         other -> assertFailure $ show other

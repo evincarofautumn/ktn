@@ -23,6 +23,7 @@ module Kitten
   ( CaseDef(..)
   , CaseFields(..)
   , Col(..)
+  , ElemTag(..)
   , Enc(..)
   , ErrMsg(..)
   , Fixity(..)
@@ -32,9 +33,11 @@ module Kitten
   , Kind(..)
   , Loc(..)
   , Locd(..)
+  , MetaDef(..)
   , PermDef(..)
   , Permit(..)
   , Phase(..)
+  , Qual(..)
   , Quant(..)
   , Row(..)
   , Sig(..)
@@ -47,6 +50,7 @@ module Kitten
   , Unqual(..)
   , Unres(..)
   , Var(..)
+  , Vocab(..)
   , WordDef(..)
   , type (+)
   , bracket
@@ -65,6 +69,7 @@ import Control.Monad (guard, join, mzero, void)
 import Data.Char
 import Data.Foldable (asum, toList)
 import Data.Function (on)
+import Data.Functor ((<&>))
 import Data.List (foldl', groupBy)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map (Map)
@@ -180,6 +185,17 @@ data Elem :: Phase -> Type where
   VocabSynElem :: VocabSyn p -> Elem p
   WordSynElem :: WordSyn p -> Elem p
   WordElem :: WordDef p -> Elem p
+
+-- | A tag used to disambiguate the category of a name, particularly in import
+-- and export lists. This redundancy ensures that the type of entity a name
+-- refers to is always unambiguous
+data ElemTag :: Type where
+  PermTag :: ElemTag
+  TraitTag :: ElemTag
+  TypeTag :: ElemTag
+  VocabTag :: ElemTag
+  WordTag :: ElemTag
+  deriving (Eq, Show)
 
 -- | The encoding of a token with both ASCII and Unicode spellings.
 data Enc :: Type where
@@ -550,8 +566,16 @@ instance (Pretty a) => Pretty (Locd a) where
 
 -- | A definition of metadata.
 data MetaDef :: Phase -> Type where
-  MetaDef :: MetaDef p
-  deriving (Eq, Show)
+  MetaDef ::
+    { metaDefLoc :: !Loc
+    , metaDefTag :: !ElemTag
+    , metaDefName :: !(Name p)
+    , metaDefQuant :: !(Maybe (Quant p))
+    , metaDefData :: !(Map (Qual 'Abs) (Term 'Parsed))
+    } -> MetaDef p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (MetaDef p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (MetaDef p)
 
 -- | The type of names in the given compiler phase.
 type family Name (phase :: Phase) :: Type where
@@ -608,8 +632,22 @@ data Phase :: Type where
 
 -- | A qualified name with the given vocab root.
 data Qual :: Root -> Type where
-  Qual :: !(Vocab r) -> !Unqual -> Qual r
+  Qual ::
+    { qualPrefix :: !(Vocab r)
+    , qualUnqual :: !Unqual
+    } -> Qual r
   deriving (Eq, Show)
+
+-- | Qualified names are sorted in lexicographical order of all their name
+-- parts; without this instance, all global names would be sorted first.
+instance Ord (Qual r) where
+  compare = comparing (V.snoc <$> vocabParts . qualPrefix <*> qualUnqual)
+    where
+      -- Defined locally instead of as record accessors on the 'Vocab' type, to
+      -- avoid mixing up absolute and relative parts.
+      vocabParts :: Vocab p -> Vector Unqual
+      vocabParts (VocabRel parts) = parts
+      vocabParts (VocabAbs parts) = parts
 
 -- | A universal or existential quantifier.
 data Quant :: Phase -> Type where
@@ -1214,6 +1252,7 @@ data Vocab :: Root -> Type where
   VocabRel :: !(Vector Unqual) -> Vocab 'Rel
 
 deriving instance Eq (Vocab r)
+deriving instance Ord (Vocab r)
 deriving instance Show (Vocab r)
 
 data VocabSyn :: Phase -> Type where
@@ -1318,8 +1357,8 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
         <* MP.notFollowedBy (MP.try exclude)
 
     locdkwd :: Text -> Tokenizer (Locd Text)
-    locdkwd = ML.lexeme silence . locd
-      . (<* MP.notFollowedBy (MP.try wordChar)) . MC.string
+    locdkwd = MP.try . ML.lexeme silence . locd
+      . (<* MP.notFollowedBy (MP.lookAhead wordChar)) . MC.string
 
     locdkwd' :: Text -> Tok b -> Tokenizer (Locd (Tok b))
     locdkwd' kwd tok = (tok <$) <$> locdkwd kwd
@@ -1787,6 +1826,14 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
           Just{} -> UnresQualAbs . Qual (VocabAbs prefix) <$> namePart
           Nothing -> UnresQualRel . Qual (VocabRel prefix) <$> namePart
 
+    metaKeyName :: Parser (Qual 'Abs)
+    metaKeyName = unresName <&> \ case
+      UnresUnqual unqual
+        -> Qual (VocabAbs mempty) unqual
+      UnresQualRel (Qual (VocabRel prefix) unqual)
+        -> Qual (VocabAbs prefix) unqual
+      UnresQualAbs qual -> qual
+
     -- <elem>
     --   ::= <inst-def>
     --     | <meta-def>
@@ -1815,14 +1862,39 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
       InstDef loc <$> unresName <*> signature <*> optBlocked expr
 
     -- <meta-def>
-    --   ::= "about" <qual> "{" <kvp>* "}"
-    --     | "about" "instance" <qual> "{" <kvp>* "}"
-    --     | "about" "permission" <qual> "{" <kvp>* "}"
-    --     | "about" "trait" <qual> "{" <kvp>* "}"
-    --     | "about" "type" <qual> "{" <kvp>* "}"
-    --     | "about" "vocab" <qual> "{" <kvp>* "}"
+    --   ::= "about" <qual> <quant>? "{" <kvp>* "}"
+    --     | "about" "instance" <qual> <quant>? "{" <kvp>* "}"
+    --     | "about" "permission" <qual> <quant>? "{" <kvp>* "}"
+    --     | "about" "trait" <qual> <quant>? "{" <kvp>* "}"
+    --     | "about" "type" <qual> <quant>? "{" <kvp>* "}"
+    --     | "about" "vocab" <qual> <quant>? "{" <kvp>* "}"
     metaDef :: Parser (MetaDef 'Parsed)
-    metaDef = mzero  -- error "TODO: metaDef"
+    metaDef = MP.label "metadata block" do
+      _ :@ loc <- match KwdAbout
+      -- TODO: Accept type arguments in addition to type parameters, for adding
+      -- metadata associated with specializations.
+      MetaDef loc <$> elemTag <*> unresName <*> optional quant
+        <*> (M.fromList <$> blocked (many keyValuePair))
+      where
+        keyValuePair :: Parser (Qual 'Abs, Term 'Parsed)
+        keyValuePair = (,) <$> metaKeyName
+          <*> (blocked expr <* optional (match Term))
+
+    -- <elem-tag>
+    --   ::= "permission"
+    --     | "trait"
+    --     | "type"
+    --     | "vocab"
+    --
+    -- TODO: Don't make 'WordTag' default?
+    elemTag :: Parser ElemTag
+    elemTag = MP.label "element tag" $ asum
+      [ PermTag <$ match KwdPermission
+      , TraitTag <$ match KwdTrait
+      , TypeTag <$ match KwdType
+      , VocabTag <$ match KwdVocab
+      , pure WordTag
+      ]
 
     -- <perm-elem>
     --   ::= <perm-def>
@@ -1945,7 +2017,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
         wordDef :: Parser (WordDef 'Parsed)
         wordDef = MP.label "word definition" do
           _ :@ loc <- match KwdDefine
-          WordDef loc <$> unresName <*> signature <*> blocked expr
+          WordDef loc <$> unresName <*> signature <*> blocked identityTerm
 
         wordSyn :: Parser (WordSyn 'Parsed)
         wordSyn = MP.label "word synonym" do
@@ -2146,6 +2218,8 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     --     | "(" <term>* <op> ")"
     term :: Parser (Term 'Parsed)
     term = MP.failure Nothing (S.fromList [ME.Label ('T':|"ODO: parse term")])  -- error "TODO: term"
+
+    identityTerm = Identity () <$> getSourceLoc
 
     expr :: Parser (Term 'Parsed)
     expr = do
