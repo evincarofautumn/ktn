@@ -8,11 +8,14 @@
 
 module Main (main) where
 
+import Data.Foldable (for_)
 import Data.Text (Text)
+import Data.Vector (Vector)
 import Kitten
 import Test.HUnit
 import Test.Hspec
 import qualified Data.Map as M
+import qualified Data.Text as T
 import qualified Data.Vector as V
 
 main :: IO ()
@@ -328,7 +331,7 @@ spec = do
           :@ Loc testName (Row 3) (Col 11) (Row 3) (Col 11)
         ]
 
-  describe "parsing" do
+  describe "parsing top-level program elements" do
 
     it "parses empty fragment from empty input" do
       testParse "" `shouldBe` emptyFrag
@@ -362,8 +365,8 @@ spec = do
         Frag
           { fragWords = [WordDef
             { wordDefName = UnresUnqual (Unqual Postfix "nop")
-            , wordDefSig = FunSig _ (V.null -> True) (V.null -> True) (V.null -> True)
-            , wordDefBody = Identity () _
+            , wordDefSig = FunSig _ Null Null Null
+            , wordDefBody = Block (V.toList -> [Identity () _])
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -376,8 +379,8 @@ spec = do
             , wordDefSig = FunSig _
               (V.toList -> [Int32])
               (V.toList -> [Int32])
-              (V.null -> True)
-            , wordDefBody = Identity () _
+              Null
+            , wordDefBody = Block (V.toList -> [Identity () _])
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -391,8 +394,8 @@ spec = do
             , wordDefSig = FunSig _
               (V.toList -> [Int32, Int32, Int32])
               (V.toList -> [Int32, Int32, Int32])
-              (V.null -> True)
-            , wordDefBody = Identity () _
+              Null
+            , wordDefBody = Block (V.toList -> [Identity () _])
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -414,11 +417,11 @@ spec = do
                   , (FunSig _
                     (V.toList -> [NameSig "A"])
                     (V.toList -> [NameSig "B"])
-                    (V.null -> True))
+                    Null)
                   ])
                 (V.toList -> [AppSig _ (NameSig "List") (NameSig "B")])
-                (V.null -> True))
-            , wordDefBody = Identity () _
+                Null)
+            , wordDefBody = Block (V.toList -> [Identity () _])
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -460,7 +463,7 @@ spec = do
                     (NameSig "D")
                   ])
                 (V.toList -> [Grant (UnresUnqual (Unqual Postfix "P"))]))
-            , wordDefBody = Identity () _
+            , wordDefBody = Block (V.toList -> [Identity () _])
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -519,7 +522,7 @@ spec = do
               (V.toList -> [NameSig "Int32"])
               (V.toList -> [NameSig "Int32"])
               (V.toList -> [])
-            , instDefBody = Just (Identity () _)
+            , instDefBody = Just (Block (V.toList -> [Identity () _]))
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -966,11 +969,199 @@ spec = do
           } -> pure ()
         other -> assertFailure $ show other
 
+  describe "parsing terms" do
+
+    it "parses 'as' section with one type" do
+      case testParse "(as Int32)" of
+        Frag
+          { fragTerms = [AsSection () _ (V.toList -> [Int32])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'as' section with trailing comma" do
+      case testParse "(as Int32,)" of
+        Frag
+          { fragTerms = [AsSection () _ (V.toList -> [Int32])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'as' section with multiple types" do
+      case testParse "(as Int32, Int64)" of
+        Frag
+          { fragTerms = [AsSection () _ (V.toList -> [Int32, Int64])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'call'" do
+      case testParse "call" of
+        Frag
+          { fragTerms = [Call () _]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'do' with block" do
+      case testParse "do (f) { g }" of
+        Frag
+          { fragTerms =
+            [ Do () _
+              (Invoke () _ Postfix (Instd (UnqualName "f") Null))
+              (Block (V.toList -> [Invoke () _ Postfix (Instd (UnqualName "g") Null)]))
+            ]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    -- TODO: Parse 'do' with block-like.
+
+    it "parses grouped expression" do
+      case testParse "(f g h)" of
+        Frag
+          { fragTerms =
+            [ Group _
+              (Compose ()
+                (Compose ()
+                  (Invoke () _ Postfix (Instd (UnqualName "f") Null))
+                  (Invoke () _ Postfix (Instd (UnqualName "g") Null)))
+                (Invoke () _ Postfix (Instd (UnqualName "h") Null)))
+            ]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'jump'" do
+      case testParse "jump" of
+        Frag
+          { fragTerms = [Jump () _]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'loop'" do
+      case testParse "loop" of
+        Frag
+          { fragTerms = [Loop () _]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'return'" do
+      case testParse "return" of
+        Frag
+          { fragTerms = [Return () _]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses ASCII character literal with character" do
+      case testParse "'a'" of
+        Frag
+          { fragTerms = [PushChar () _ (CharLit ASCII (Right 'a'))]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    let
+      encodings =
+        [ (ASCII, "'", "'")
+        , (Unicode, "\x2018", "\x2019")
+        ]
+
+      escapes =
+        [ ("NUL", NUL)
+        , ("SOH", SOH)
+        , ("STX", STX)
+        , ("ETX", ETX)
+        , ("EOT", EOT)
+        , ("ENQ", ENQ)
+        , ("ACK", ACK)
+        , ("a", BEL EscShort)
+        , ("BEL", BEL EscLong)
+        , ("b", BS EscShort)
+        , ("BS", BS EscLong)
+        , ("t", HT EscShort)
+        , ("HT", HT EscLong)
+        , ("n", LF EscShort)
+        , ("LF", LF EscLong)
+        , ("v", VT EscShort)
+        , ("VT", VT EscLong)
+        , ("f", FF EscShort)
+        , ("FF", FF EscLong)
+        , ("r", CR EscShort)
+        , ("CR", CR EscLong)
+        , ("SO", SO)
+        , ("SI", SI)
+        , ("DLE", DLE)
+        , ("DC1", DC1)
+        , ("DC2", DC2)
+        , ("DC3", DC3)
+        , ("DC4", DC4)
+        , ("NAK", NAK)
+        , ("SYN", SYN)
+        , ("ETB", ETB)
+        , ("CAN", CAN)
+        , ("EM", EM)
+        , ("SUB", SUB)
+        , ("e", ESC EscShort)
+        , ("ESC", ESC EscLong)
+        , ("FS", FS)
+        , ("GS", GS)
+        , ("RS", RS)
+        , ("US", US)
+        , ("s", SP EscShort)
+        , ("SP", SP EscLong)
+        , ("DEL", DEL)
+        , ("'", Apos)
+        , ("\\", Backslash)
+        , ("0", Code Dec '\0')
+        , ("182", Code Dec '\182')
+        , ("xB6", Code Hex '\xB6')
+        , ("x00B6", Code Hex '\xB6')
+        , ("o266", Code Oct '\xB6')
+        , ("^@", Ctrl '\0')
+        , ("^A", Ctrl '\1')
+        , ("^Z", Ctrl '\26')
+        , ("^[", Ctrl '\27')
+        , ("^\\", Ctrl '\28')
+        , ("^]", Ctrl '\29')
+        , ("^^", Ctrl '\30')
+        , ("^_", Ctrl '\31')
+        , ("&", Empty)
+        , ("        ", Gap ' ')
+        , ("\t       ", Gap '\t')
+        , ("\n\t", Gap '\n')
+        , ("\x201C", LeftDouble)
+        , ("\x2018", LeftSingle)
+        , ("\x201D", RightDouble)
+        , ("\x2019", RightSingle)
+        , ("\"", Quot)
+        ]
+
+    for_ encodings $ \ (expectedEnc, open, close)
+      -> for_ escapes $ \ (escape, expectedEsc) -> let
+        message = concat
+          [ "parses "
+          , show expectedEnc
+          , " character literal with "
+          , show escape
+          , " escape"
+          ]
+        input = T.pack $ concat [open, "\\", escape, close]
+        in it message case testParse input of
+          Frag
+            { fragTerms = [PushChar () _ (CharLit actualEnc (Left actualEsc))]
+            }
+            | actualEnc == expectedEnc
+            , actualEsc == expectedEsc -> pure ()
+          other -> assertFailure $ show other
+
 pattern Int32 :: Sig 'Parsed
-pattern Int32 <- VarSig _ (UnresUnqual (Unqual Postfix "Int32"))
+pattern Int32 <- VarSig _ (UnqualName "Int32")
+
+pattern Int64 :: Sig 'Parsed
+pattern Int64 <- VarSig _ (UnqualName "Int64")
 
 pattern NameSig :: Text -> Sig 'Parsed
-pattern NameSig name <- VarSig _ (UnresUnqual (Unqual Postfix name))
+pattern NameSig name <- VarSig _ (UnqualName name)
+
+pattern UnqualName :: Text -> Unres
+pattern UnqualName name = UnresUnqual (Unqual Postfix name)
+
+pattern Null :: Vector a
+pattern Null <- (V.null -> True)
 
 testTokenize :: Text -> [Locd (Tok 'Unbrack)]
 testTokenize = testTokenizeRow (Row 1)

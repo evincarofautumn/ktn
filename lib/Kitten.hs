@@ -20,16 +20,25 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 module Kitten
-  ( CaseDef(..)
+  ( Base(..)
+  , Block(..)
+  , Case(..)
+  , CaseDef(..)
   , CaseFields(..)
+  , CharLit(..)
   , Col(..)
   , ElemTag(..)
+  , Elif(..)
+  , Else(..)
   , Enc(..)
   , ErrMsg(..)
+  , Esc(..)
+  , EscLength(..)
   , Fixity(..)
   , Frag(..)
   , Indented(..)
   , InstDef(..)
+  , Instd(..)
   , Kind(..)
   , Loc(..)
   , Locd(..)
@@ -65,7 +74,7 @@ module Kitten
 
 import Control.Applicative (Alternative(..), empty, many, optional, some)
 import Control.Arrow ((|||))
-import Control.Monad (guard, join, mzero, void)
+import Control.Monad (guard, join, void)
 import Data.Char
 import Data.Foldable (asum, toList)
 import Data.Function (on)
@@ -90,6 +99,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Vector as V
+import qualified Numeric
 import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
@@ -113,6 +123,10 @@ data Base :: Type where
   Hex :: Base
   deriving (Eq, Ord, Show)
 
+-- | A block of items delimited by terminators in the source.
+newtype Block a = Block { blockContents :: Vector a }
+  deriving (Eq, Ord, Show)
+
 -- | The boxity of a term that may be unboxed or boxed.
 data Box :: Type where
   Unbox :: Box
@@ -129,6 +143,18 @@ data TokPhase :: Type where
 
 -- | A bracket inserter.
 type Bracketer = MP.Parsec Void [Indented (Locd (Tok 'Unbrack))]
+
+-- | A @case@ in a @match@ term, comprising a pattern and either a body or
+-- series of guards.
+data Case :: Phase -> Type where
+  Case
+    :: !Loc
+    -> !(Pat p)
+    -> !(Block (Term p) + (Vector (Guard p), Maybe (Block (Term p))))
+    -> Case p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Case p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (Case p)
 
 -- | The definition of a constructor of a type.
 data CaseDef :: Phase -> Type where
@@ -152,10 +178,15 @@ data CaseFields :: Phase -> Type where
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (CaseFields p)
 deriving instance (Show (Anno p), Show (Name p)) => Show (CaseFields p)
 
--- | The contents of a character literal.
+-- | A character literal.
 data CharLit :: Type where
-  CharLit :: !(Esc + Char) -> CharLit
+  CharLit :: !Enc -> !(Esc + Char) -> CharLit
   deriving (Eq, Ord, Show)
+
+instance Pretty CharLit where
+  pPrint (CharLit enc _) = case enc of
+    ASCII -> "'...'"  -- TODO
+    Unicode -> "‘...’"  -- TODO
 
 -- | A column in a source location.
 newtype Col = Col Int
@@ -197,6 +228,27 @@ data ElemTag :: Type where
   WordTag :: ElemTag
   deriving (Eq, Show)
 
+-- | An @elif@ in an @if@ term.
+data Elif :: Phase -> Type where
+  Elif
+    :: !Loc
+    -> !(Term p)
+    -> !(Block (Term p))
+    -> Elif p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Elif p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (Elif p)
+
+-- | An @else@ in an @if@ or @match@ term.
+data Else :: Phase -> Type where
+  Else
+    :: !Loc
+    -> !(Block (Term p))
+    -> Else p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Else p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (Else p)
+
 -- | The encoding of a token with both ASCII and Unicode spellings.
 data Enc :: Type where
   ASCII :: Enc
@@ -212,7 +264,7 @@ data Esc :: Type where
 
   -- ASCII Control Codes
 
-  -- | @\\0@, @\\NUL@: U+0000 NULL
+  -- | @\\NUL@: U+0000 NULL
   NUL :: Esc
   -- | @\\SOH@: U+0001 START OF HEADING
   SOH :: Esc
@@ -227,19 +279,19 @@ data Esc :: Type where
   -- | @\\ACK@: U+0006 ACKNOWLEDGE
   ACK :: Esc
   -- | @\\a@, @\\BEL@: U+0007 BELL
-  BEL :: Esc
+  BEL :: !EscLength -> Esc
   -- | @\\b@, @\\BS@: U+0008 BACKSPACE
-  BS :: Esc
-  -- | @\\t@, @\\HT@, @\\TAB@: U+0009 HORIZONTAL TABULATION
-  HT :: Esc
+  BS :: !EscLength -> Esc
+  -- | @\\t@, @\\HT@: U+0009 HORIZONTAL TABULATION
+  HT :: !EscLength -> Esc
   -- | @\\n@, @\\LF@: U+000A LINE FEED
-  LF :: Esc
+  LF :: !EscLength -> Esc
   -- | @\\v@, @\\VT@: U+000B VERTICAL TABULATION
-  VT :: Esc
+  VT :: !EscLength -> Esc
   -- | @\\f@, @\\FF@: U+000C FORM FEED
-  FF :: Esc
+  FF :: !EscLength -> Esc
   -- | @\\r@, @\\CR@: U+000D CARRIAGE RETURN
-  CR :: Esc
+  CR :: !EscLength -> Esc
   -- | @\\SO@: U+000E SHIFT OUT
   SO :: Esc
   -- | @\\SI@: U+000F SHIFT IN
@@ -267,7 +319,7 @@ data Esc :: Type where
   -- | @\\SUB@: U+001A SUBSTITUTION
   SUB :: Esc
   -- | @\\e@, @\\ESC@: U+001B ESCAPE
-  ESC :: Esc
+  ESC :: !EscLength -> Esc
   -- | @\\FS@: U+001C FILE SEPARATOR
   FS :: Esc
   -- | @\\GS@: U+001D GROUP SEPARATOR
@@ -277,19 +329,19 @@ data Esc :: Type where
   -- | @\\US@: U+001F UNIT SEPARATOR
   US :: Esc
   -- | @\\s@, @\\SP@: U+0020 SPACE
-  SP :: Esc
+  SP :: !EscLength -> Esc
   -- | @\\DEL@: U+007F DELETE
   DEL :: Esc
 
   -- Other
 
-  -- | @'@: U+0027 APOSTROPHE
+  -- | @\\'@: U+0027 APOSTROPHE
   Apos :: Esc
   -- | @\\\\@: U+005C BACKSLASH
   Backslash :: Esc
   -- | @\\N@, @\\bN@, @\\oN@, @\\xN@: Unicode character number in decimal,
   -- binary, octal, or hexadecimal, respectively
-  Code :: !Char -> Esc
+  Code :: !Base -> !Char -> Esc
   -- | @\\cC@, @\\^C@:
   --
   -- * @\\c\@@: U+0000 NULL
@@ -300,13 +352,28 @@ data Esc :: Type where
   -- * @\\c^@: U+001E RECORD SEPARATOR
   -- * @\\c_@: U+001F UNIT SEPARATOR
   Ctrl :: !Char -> Esc
-  -- | Empty escape
+  -- | @\\&@: Empty escape
   Empty :: Esc
   -- | String gap
   Gap :: !Char -> Esc
+  -- | @\\“@: U+201C LEFT DOUBLE QUOTATION MARK
+  LeftDouble :: Esc
+  -- | @\\‘@: U+2018 LEFT SINGLE QUOTATION MARK
+  LeftSingle :: Esc
+  -- | @\\”@: U+201D RIGHT DOUBLE QUOTATION MARK
+  RightDouble :: Esc
+  -- | @\\’@: U+2019 RIGHT SINGLE QUOTATION MARK
+  RightSingle :: Esc
   -- | @"@: U+0022 QUOTATION MARK
   Quot :: Esc
 
+  deriving (Eq, Ord, Show)
+
+-- | Whether an escape is written with an abbreviated name (@\\n@, @\\t@) or the
+-- full ASCII mnemonic (@\\LF@, @\\HT@).
+data EscLength :: Type where
+  EscShort :: EscLength
+  EscLong :: EscLength
   deriving (Eq, Ord, Show)
 
 -- | The lexical fixity of a word: 'Infix' for operators, 'Postfix' otherwise.
@@ -392,6 +459,17 @@ deriving instance
   (Eq (Anno p), Eq (Name p), forall a. Eq a => Eq (f a))
   => Eq (Frag f p)
 
+-- | A @when@ guard in a @case@ branch.
+data Guard :: Phase -> Type where
+  Guard
+    :: !Loc
+    -> !(Term p)
+    -> !(Block (Term p))
+    -> Guard p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Guard p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (Guard p)
+
 -- | The de Bruijn index of a local variable.
 newtype Ind = Ind Int
   deriving (Show)
@@ -422,7 +500,7 @@ data InstDef :: Phase -> Type where
     { instDefLoc :: !Loc
     , instDefName :: !(Name p)
     , instDefSig :: !(Sig p)
-    , instDefBody :: !(Maybe (Term p))
+    , instDefBody :: !(Maybe (Block (Term p)))
     } -> InstDef p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (InstDef p)
@@ -496,7 +574,7 @@ instance Show Loc where
 -- | Copied from its derived implementation as if it were defined using
 -- positional syntax instead of record notation.
 instance Read Loc where
-  readPrec = TR.parens $ RP.prec 10 $ do
+  readPrec = TR.parens $ RP.prec 10 do
     TR.Ident "Loc" <- TR.lexP
     name <- RP.step readPrec
     beginRow <- RP.step readPrec
@@ -584,20 +662,180 @@ type family Name (phase :: Phase) :: Type where
   Name 'Typechecked = Res
   Name 'Desugared = Res
 
--- | The contents of a paragraph literal.
+-- | A paragraph literal.
 data ParaLit :: Type where
-  ParaLit :: !(Vector (Vector (Esc + Text))) -> ParaLit
+  ParaLit :: !Enc -> !(Vector (Vector (Esc + Text))) -> ParaLit
   deriving (Eq, Ord, Show)
+
+instance Pretty ParaLit where
+  pPrint (ParaLit enc _) = case enc of
+    ASCII -> "\"\"\"...\"\"\""  -- TODO
+    Unicode -> "¶...¶"  -- TODO
 
 -- | A token parser.
 type Parser = MP.Parsec Void [Locd (Tok 'Brack)]
+
+-- | A pattern.
+data Pat :: Phase -> Type where
+
+  -- A constructor application pattern:
+  --
+  -- > case (patN ctor) { ... }
+  --
+  AppPat
+    :: !Loc
+    -> !(Vector (Pat p))
+    -> !(Name p)
+    -> Pat p
+
+  -- | A type signature in a pattern:
+  --
+  -- > case (pat as Type) { ... }
+  --
+  AsPat
+    :: !Loc
+    -> !(Pat p)
+    -> !(Sig p)
+    -> Pat p
+
+  -- | A character literal pattern:
+  --
+  -- > case 'c' { ... }
+  --
+  CharPat
+    :: !Loc
+    -> !CharLit
+    -> Pat p
+
+  -- | A bare constructor pattern:
+  --
+  -- > case ctor { ... }
+  --
+  CtorPat
+    :: !Loc
+    -> !(Name p)
+    -> Pat p
+
+  -- | A float literal pattern:
+  --
+  -- > case 1.0 { ... }
+  --
+  FloatPat
+    :: !Loc
+    -> !FloatLit
+    -> Pat p
+
+  -- | A pattern that matches anything and discards it:
+  --
+  -- > // Matches any 'only', ignoring its contents.
+  -- > case (_ only) { ... }
+  --
+  -- > // Equivalent to 'else { ... }'.
+  -- > case _ { ... }
+  --
+  IgnorePat
+    :: !Loc
+    -> Pat p
+
+  -- | An integer literal pattern:
+  --
+  -- > case 24 { ... }
+  IntPat
+    :: !Loc
+    -> !IntLit
+    -> Pat p
+
+  -- | A pattern that binds a name to the term matched by a subpattern:
+  --
+  -- > case ((x rest cons) -> xs) { ... }
+  --
+  LambdaPat
+    :: !Loc
+    -> !(Pat p)
+    -> !Unqual
+    -> Pat p
+
+  -- | A list or array pattern:
+  --
+  -- > case []            { ... }
+  -- > case [...]         { ... }
+  -- > case [patN, ...]   { ... }
+  -- > case [..., patN]   { ... }
+  -- > case [||]          { ... }
+  -- > case [|...|]       { ... }
+  -- > case [|patN, ...|] { ... }
+  -- > case [|..., patN|] { ... }
+  --
+  ListPat
+    :: !Loc
+    -> !Box
+    -> !(SeqMatch p)
+    -> Pat p
+
+  -- | Disjunction between patterns. The branches of a disjunction must bind the
+  -- same variables of the same types.
+  --
+  -- > define from_either<A> (Either<A, A> -> A):
+  -- >   match case ((x left) | (x right)) { x }
+  --
+  OrPat
+    :: !Loc
+    -> !(Pat p)
+    -> !(Pat p)
+    -> Pat p
+
+  -- | A paragraph literal pattern:
+  --
+  -- > case
+  -- >   """
+  -- >   hello
+  -- >   world
+  -- >   """
+  -- >   { ... }
+  ParaPat
+    :: !Loc
+    -> !ParaLit
+    -> Pat p
+
+  -- | A sequence of patterns, only valid at the top level:
+  --
+  -- > case (false, true) { ... }
+  --
+  SeqPat
+    :: !Loc
+    -> !(Vector (Pat p))
+    -> Pat p
+
+  -- | A text literal pattern:
+  --
+  -- > case "beans" { ... }
+  --
+  TextPat
+    :: !Loc
+    -> !TextLit
+    -> Pat p
+
+  -- | A pattern that matches anything and binds it to a name:
+  --
+  -- > case (x only) { ... }
+  --
+  -- Equivalent to:
+  --
+  -- > case (_ -> x) { ... }
+  VarPat
+    :: !Loc
+    -> !Unqual
+    -> Pat p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Pat p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (Pat p)
 
 -- | The definition of a permission.
 data PermDef :: Phase -> Type where
   PermDef ::
     { permDefLoc :: !Loc
     , permDefName :: !(Name p)
-    , permDefBody :: !(Maybe (Term p))
+    , permDefBody :: !(Maybe (Block (Term p)))
     } -> PermDef p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (PermDef p)
@@ -682,6 +920,36 @@ newtype Row = Row Int
 rowVal :: Row -> Int
 rowVal (Row val) = val
 
+-- | How to perform matching on a list or array in a pattern.
+data SeqMatch :: Phase -> Type where
+
+  -- | Match zero elements.
+  SeqMatch0 :: SeqMatch p
+
+  -- | Match an exact number of elements.
+  --
+  -- > // Sequence with N elements matching patN.
+  -- > case [patN]
+  --
+  SeqMatchN :: !(Vector (Pat p)) -> SeqMatch p
+
+  -- | Match the beginning of the sequence, ignoring later elements:
+  --
+  -- > // Sequence with N+X elements where first N match patN.
+  -- > case [patN, ...] { ... }
+  --
+  SeqMatchFirstN :: !(Vector (Pat p)) -> SeqMatch p
+
+  -- | Match the end of the sequence, ignoring earlier elements:
+  --
+  -- > // Sequence with X+N elements where last N match patN.
+  -- > [..., patN]
+  --
+  SeqMatchLastN :: !(Vector (Pat p)) -> SeqMatch p
+
+deriving instance (Eq (Anno p), Eq (Name p)) => Eq (SeqMatch p)
+deriving instance (Show (Anno p), Show (Name p)) => Show (SeqMatch p)
+
 -- | A parsed type signature.
 data Sig :: Phase -> Type where
   AppSig :: !Loc -> !(Sig p) -> !(Sig p) -> Sig p
@@ -746,8 +1014,15 @@ data Term :: Phase -> Type where
   -- > "(" "as" <sig> ("," <sig>)* ")"
   As
     :: Anno p
-    -> !(Maybe (Term p))
+    -> Loc
+    -> !(Term p)
     -> !(Sig p)
+    -> Term p
+
+  AsSection
+    :: Anno p
+    -> Loc
+    -> !(Vector (Sig p))
     -> Term p
 
   -- > <term> <term>
@@ -766,8 +1041,9 @@ data Term :: Phase -> Type where
   -- > "do" "(" <term>* ")" <block>
   Do
     :: Anno p
+    -> !Loc
     -> !(Term p)
-    -> !(Term p)
+    -> !(Block (Term p))
     -> Term p
 
   Generic
@@ -793,11 +1069,12 @@ data Term :: Phase -> Type where
   -- >   ("elif" "(" <term> ")" <block>)*
   -- >   ("else" <block>)?
   If
-    :: !Loc
-    -> Anno p
+    :: Anno p
+    -> !Loc
     -> !(Maybe (Term p))
-    -> !(Vector (Loc, Term p, Term p))
-    -> !(Maybe (Loc, Term p))
+    -> !(Block (Term p))
+    -> !(Vector (Elif p))
+    -> !(Maybe (Else p))
     -> Term p
 
   -- If the name is infix but the call is postfix, this is an operator invoked
@@ -811,7 +1088,7 @@ data Term :: Phase -> Type where
     :: Anno p
     -> !Loc
     -> !Fixity
-    -> !(Name p)
+    -> !(Instd p)
     -> Term p
 
   -- > "jump"
@@ -838,6 +1115,7 @@ data Term :: Phase -> Type where
   List
     :: Anno p
     -> !Loc
+    -> !Enc
     -> !Box
     -> !(Vector (Term p))
     -> Term p
@@ -855,8 +1133,8 @@ data Term :: Phase -> Type where
     :: Anno p
     -> !Loc
     -> !(Maybe (Term p))
-    -> !(Vector (Loc, Unqual, Term p))
-    -> !(Maybe (Loc, Term p))
+    -> !(Vector (Case p))
+    -> !(Maybe (Else p))
     -> Term p
 
   -- A fully applied infix operator call.
@@ -875,7 +1153,6 @@ data Term :: Phase -> Type where
   PushChar
     :: Anno p
     -> !Loc
-    -> !Enc
     -> !CharLit
     -> Term p
 
@@ -913,7 +1190,7 @@ data Term :: Phase -> Type where
     :: Anno p
     -> !Loc
     -> !Box
-    -> !(Term p)
+    -> !(Block (Term p))
     -> Term p
 
   -- > "\\" <term>
@@ -945,10 +1222,15 @@ deriving instance (Show (Anno p), Show (Name p)) => Show (Term p)
 newtype TEVar = TEVar (Var 'Renamed)
   deriving (Show)
 
--- | The contents of a text literal.
+-- | A text literal.
 data TextLit :: Type where
-  TextLit :: !(Vector (Esc + Text)) -> TextLit
+  TextLit :: !Enc -> !(Vector (Esc + Text)) -> TextLit
   deriving (Eq, Ord, Show)
+
+instance Pretty TextLit where
+  pPrint (TextLit enc _) = case enc of
+    ASCII -> "\"...\""  -- TODO
+    Unicode -> "“...”"  -- TODO
 
 -- | A token, indexed by a 'TokPhase' that indicates whether it has been
 -- 'bracket'ed and whether it contains lexical errors.
@@ -960,6 +1242,8 @@ data Tok :: TokPhase -> Type where
   KwdAbout :: Tok b
   -- | @as@ keyword.
   KwdAs :: Tok b
+  -- | @call@ keyword.
+  KwdCall :: Tok b
   -- | @case@ keyword.
   KwdCase :: Tok b
   -- | @define@ keyword.
@@ -982,10 +1266,12 @@ data Tok :: TokPhase -> Type where
   KwdIntrinsic :: Tok b
   -- | @jump@ keyword.
   KwdJump :: Tok b
-  -- | @match@ keyword.
-  KwdMatch :: Tok b
   -- | @loop@ keyword.
   KwdLoop :: Tok b
+  -- | @match@ keyword.
+  KwdMatch :: Tok b
+  -- | @otherwise@ keyword.
+  KwdOtherwise :: Tok b
   -- | @permission@ keyword.
   KwdPermission :: Tok b
   -- | @return@ keyword.
@@ -998,6 +1284,8 @@ data Tok :: TokPhase -> Type where
   KwdType :: Tok b
   -- | @vocab@ keyword.
   KwdVocab :: Tok b
+  -- | @when@ keyword.
+  KwdWhen :: Tok b
   -- | @with@ keyword.
   KwdWith :: Tok b
 
@@ -1059,15 +1347,15 @@ data Tok :: TokPhase -> Type where
   -- Literals
 
   -- | Character literal.
-  Char :: !Enc -> !CharLit -> Tok b
+  Char :: !CharLit -> Tok b
   -- | Floating-point literal.
   Float :: !FloatLit -> Tok b
   -- | Integer literal.
   Integer :: !IntLit -> Tok b
   -- | Paragraph literal.
-  Para :: !Enc -> !ParaLit -> Tok b
+  Para :: !ParaLit -> Tok b
   -- | Text literal.
-  Text :: !Enc -> !TextLit -> Tok b
+  Text :: !TextLit -> Tok b
 
   -- Identifiers
 
@@ -1092,6 +1380,7 @@ instance Pretty (Tok b) where
   pPrint = \ case
     KwdAbout -> "about"
     KwdAs -> "as"
+    KwdCall -> "call"
     KwdCase -> "case"
     KwdDefine -> "define"
     KwdDo -> "do"
@@ -1103,14 +1392,16 @@ instance Pretty (Tok b) where
     KwdInstance -> "instance"
     KwdIntrinsic -> "intrinsic"
     KwdJump -> "jump"
-    KwdMatch -> "match"
     KwdLoop -> "loop"
+    KwdMatch -> "match"
+    KwdOtherwise -> "otherwise"
     KwdPermission -> "permission"
     KwdReturn -> "return"
     KwdSynonym -> "synonym"
     KwdTrait -> "trait"
     KwdType -> "type"
     KwdVocab -> "vocab"
+    KwdWhen -> "when"
     KwdWith -> "with"
     AngleBegin ASCII -> "<"
     AngleBegin Unicode -> "\x27E8"
@@ -1143,14 +1434,11 @@ instance Pretty (Tok b) where
     UnboxedBegin Unicode -> "\x2983"
     UnboxedEnd ASCII -> "|}"
     UnboxedEnd Unicode -> "\x2984"
-    Char ASCII lit -> PP.hcat ["'", "..." {- pPrint lit -}, "'"]
-    Char Unicode lit -> PP.hcat ["\x2018", "..." {- pPrint lit -}, "\x2019"]
+    Char lit -> pPrint lit
     Float lit -> "..." {- pPrint lit -}
     Integer lit -> "..." {- pPrint lit -}
-    Para ASCII lit -> PP.vcat ["\"\"\"", "..." {- pPrint lit -}, "\"\"\""]
-    Para Unicode lit -> PP.vcat ["\x00B6", "..." {- pPrint lit -}, "\x00B6"]
-    Text ASCII lit -> PP.hcat ["\"", "..." {- pPrint lit -}, "\""]
-    Text Unicode lit -> PP.hcat ["\x201C", "..." {- pPrint lit -}, "\x201D"]
+    Para lit -> pPrint lit
+    Text lit -> pPrint lit
     Word name -> pPrint name
     TokErr src (ErrMsg msg) -> PP.hcat
       [PP.text $ T.unpack src, " /*", PP.text $ T.unpack msg, "*/"]
@@ -1166,7 +1454,7 @@ data TraitDef :: Phase -> Type where
     { traitDefLoc :: !Loc
     , traitDefName :: !(Name p)
     , traitDefSig :: !(Sig p)
-    , traitDefBody :: !(Maybe (Term p))
+    , traitDefBody :: !(Maybe (Block (Term p)))
     } -> TraitDef p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (TraitDef p)
@@ -1294,7 +1582,7 @@ data WordDef :: Phase -> Type where
     { wordDefLoc :: !Loc
     , wordDefName :: !(Name p)
     , wordDefSig :: !(Sig p)
-    , wordDefBody :: !(Term p)
+    , wordDefBody :: !(Block (Term p))
     } -> WordDef p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (WordDef p)
@@ -1433,8 +1721,22 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
           Nothing -> ListBegin :@ brackLoc
       , locdsym' "]"      ListEnd
       , locdsym' "\x2237" $ Look Unicode
-      -- TODO: character literals
-      , locdsym' "''"     Quote
+      -- TODO: Produce a TokErr and continue if closing quote is missing.
+      , locd $ MC.char '\'' *> asum
+        [ Quote <$ MC.char '\''
+        , (Char . CharLit ASCII . Left <$> escape)
+          <* MC.char '\''
+        , (Char . CharLit ASCII . Right
+            <$> MP.noneOf ("'" :: String))
+          <* MC.char '\''
+        ]
+      , locd $ MC.char '\x2018' *> asum
+        [ (Char . CharLit Unicode . Left <$> escape)
+          <* MC.char '\x2019'
+        , (Char . CharLit Unicode . Right
+            <$> MP.noneOf ("\x2018\x2019" :: String))
+          <* MC.char '\x2019'
+        ]
       , locdsymNot operatorChar "\\" Ref
       , locdsym' ","      Seq
       , locdsymNot operatorChar "#" Splice
@@ -1446,6 +1748,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
 
       , locdkwd' "about"      KwdAbout
       , locdkwd' "as"         KwdAs
+      , locdkwd' "call"       KwdCall
       , locdkwd' "case"       KwdCase
       , locdkwd' "define"     KwdDefine
       , locdkwd' "do"         KwdDo
@@ -1458,19 +1761,90 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdkwd' "instance"   KwdInstance
       , locdkwd' "intrinsic"  KwdIntrinsic
       , locdkwd' "jump"       KwdJump
-      , locdkwd' "match"      KwdMatch
       , locdkwd' "loop"       KwdLoop
+      , locdkwd' "match"      KwdMatch
+      , locdkwd' "otherwise"  KwdOtherwise
       , locdkwd' "permission" KwdPermission
       , locdkwd' "return"     KwdReturn
       , locdkwd' "synonym"    KwdSynonym
       , locdkwd' "trait"      KwdTrait
       , locdkwd' "type"       KwdType
       , locdkwd' "vocab"      KwdVocab
+      , locdkwd' "when"       KwdWhen
       , locdkwd' "with"       KwdWith
 
       , fmap (Word . Unqual Infix) <$> locdop
       , fmap (Word . Unqual Postfix) <$> locdword
       ]
+
+    escape :: Tokenizer Esc
+    escape = MP.label "escape" $ MC.char '\\' *> asum
+      [ NUL <$ MC.string "NUL"
+      , SOH <$ MC.string "SOH"
+      , STX <$ MC.string "STX"
+      , ETX <$ MC.string "ETX"
+      , EOT <$ MC.string "EOT"
+      , ENQ <$ MC.string "ENQ"
+      , ACK <$ MC.string "ACK"
+      , BEL EscShort <$ MC.string "a"
+      , BEL EscLong <$ MC.string "BEL"
+      , BS EscShort <$ MC.string "b"
+      , BS EscLong <$ MC.string "BS"
+      , HT EscShort <$ MC.string "t"
+      , HT EscLong <$ MC.string "HT"
+      , LF EscShort <$ MC.string "n"
+      , LF EscLong <$ MC.string "LF"
+      , VT EscShort <$ MC.string "v"
+      , VT EscLong <$ MC.string "VT"
+      , FF EscShort <$ MC.string "f"
+      , FF EscLong <$ MC.string "FF"
+      , CR EscShort <$ MC.string "r"
+      , CR EscLong <$ MC.string "CR"
+      , SO <$ MC.string "SO"
+      , SI <$ MC.string "SI"
+      , DLE <$ MC.string "DLE"
+      , DC1 <$ MC.string "DC1"
+      , DC2 <$ MC.string "DC2"
+      , DC3 <$ MC.string "DC3"
+      , DC4 <$ MC.string "DC4"
+      , NAK <$ MC.string "NAK"
+      , SYN <$ MC.string "SYN"
+      , ETB <$ MC.string "ETB"
+      , CAN <$ MC.string "CAN"
+      , EM <$ MC.string "EM"
+      , SUB <$ MC.string "SUB"
+      , ESC EscShort <$ MC.string "e"
+      , ESC EscLong <$ MC.string "ESC"
+      , FS <$ MC.string "FS"
+      , GS <$ MC.string "GS"
+      , RS <$ MC.string "RS"
+      , US <$ MC.string "US"
+      , SP EscShort <$ MC.string "s"
+      , SP EscLong <$ MC.string "SP"
+      , DEL <$ MC.string "DEL"
+      , Apos <$ MC.char '\''
+      , Backslash <$ MC.char '\\'
+      , uncurry Code <$> asum
+        [ (,) Dec
+          <$> (chr . read @Int <$> some MC.digitChar)
+        , (,) Hex
+          <$> (chr . readHex @Int <$> (MC.char 'x' *> some MC.hexDigitChar))
+        , (,) Oct
+          <$> (chr . readOct @Int <$> (MC.char 'o' *> some MC.octDigitChar))
+        -- Binary escapes aren't allowed because they conflict with '\b' for BS.
+        ]
+      , Ctrl <$> (MC.char '^'
+        *> (chr . subtract 0x40 . ord
+          <$> MP.satisfy ((>= '@') .&&. (<= '_'))))
+      , Empty <$ MC.char '&'
+      , Gap <$> (MP.satisfy isSpace <* MC.space)
+      , LeftDouble <$ MC.char '\x201C'
+      , LeftSingle <$ MC.char '\x2018'
+      , RightDouble <$ MC.char '\x201D'
+      , RightSingle <$ MC.char '\x2019'
+      , Quot <$ MC.char '\"'
+      ]
+
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
 -- explicit brackets and terminators.
@@ -1558,6 +1932,7 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
     fromUnbrack (tok :@ loc) = (:@ loc) <$> case tok of
       KwdAbout -> pure KwdAbout
       KwdAs -> pure KwdAs
+      KwdCall -> pure KwdCall
       KwdCase -> pure KwdCase
       KwdDefine -> pure KwdDefine
       KwdDo -> pure KwdDo
@@ -1569,14 +1944,16 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
       KwdInstance -> pure KwdInstance
       KwdIntrinsic -> pure KwdIntrinsic
       KwdJump -> pure KwdJump
-      KwdMatch -> pure KwdMatch
       KwdLoop -> pure KwdLoop
+      KwdMatch -> pure KwdMatch
+      KwdOtherwise -> pure KwdOtherwise
       KwdPermission -> pure KwdPermission
       KwdReturn -> pure KwdReturn
       KwdSynonym -> pure KwdSynonym
       KwdTrait -> pure KwdTrait
       KwdType -> pure KwdType
       KwdVocab -> pure KwdVocab
+      KwdWhen -> pure KwdWhen
       KwdWith -> pure KwdWith
       AngleBegin enc -> pure $ AngleBegin enc
       AngleEnd enc -> pure $ AngleEnd enc
@@ -1602,11 +1979,11 @@ bracket srcName tokens = case MP.runParser bracketer (show srcName) indented of
       Term -> pure Term
       UnboxedBegin enc -> pure $ UnboxedBegin enc
       UnboxedEnd enc -> pure $ UnboxedEnd enc
-      Char enc lit -> pure $ Char enc lit
+      Char lit -> pure $ Char lit
       Float lit -> pure $ Float lit
       Integer lit -> pure $ Integer lit
-      Para enc lit -> pure $ Para enc lit
-      Text enc lit -> pure $ Text enc lit
+      Para lit -> pure $ Para lit
+      Text lit -> pure $ Text lit
       Word name -> pure $ Word name
       TokErr src msg -> pure $ TokErr src msg
 
@@ -1859,7 +2236,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     instDef :: Parser (InstDef 'Parsed)
     instDef = MP.label "instance definition" do
       _ :@ loc <- match KwdInstance
-      InstDef loc <$> unresName <*> signature <*> optBlocked expr
+      InstDef loc <$> unresName <*> signature <*> optBlockOf expr
 
     -- <meta-def>
     --   ::= "about" <qual> <quant>? "{" <kvp>* "}"
@@ -1874,11 +2251,10 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
       -- TODO: Accept type arguments in addition to type parameters, for adding
       -- metadata associated with specializations.
       MetaDef loc <$> elemTag <*> unresName <*> optional quant
-        <*> (M.fromList <$> blocked (many keyValuePair))
+        <*> (M.fromList . V.toList . blockContents <$> blockOf keyValuePair)
       where
         keyValuePair :: Parser (Qual 'Abs, Term 'Parsed)
-        keyValuePair = (,) <$> metaKeyName
-          <*> (blocked expr <* optional (match Term))
+        keyValuePair = (,) <$> metaKeyName <*> blocked expr
 
     -- <elem-tag>
     --   ::= "permission"
@@ -1919,7 +2295,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
 
         permDef :: Loc -> Parser (PermDef 'Parsed)
         permDef loc = MP.label "permission definition"
-          $ PermDef loc <$> unresName <*> optBlocked expr
+          $ PermDef loc <$> unresName <*> optBlockOf expr
 
     -- <trait-elem>
     --   ::= <trait-def>
@@ -1944,7 +2320,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
 
         traitDef :: Loc -> Parser (TraitDef 'Parsed)
         traitDef loc = MP.label "trait definition"
-          $ TraitDef loc <$> unresName <*> signature <*> optBlocked expr
+          $ TraitDef loc <$> unresName <*> signature <*> optBlockOf expr
 
     traitApp :: Parser (Constraint 'Parsed)
     traitApp = MP.label "trait constraint" do
@@ -2017,7 +2393,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
         wordDef :: Parser (WordDef 'Parsed)
         wordDef = MP.label "word definition" do
           _ :@ loc <- match KwdDefine
-          WordDef loc <$> unresName <*> signature <*> blocked identityTerm
+          WordDef loc <$> unresName <*> signature <*> blocklike
 
         wordSyn :: Parser (WordSyn 'Parsed)
         wordSyn = MP.label "word synonym" do
@@ -2190,6 +2566,9 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     --     | "(" "as" seq(<sig>) ")"
     --     | "call"
     --     | "do" "(" <term>* ")" "{" <term>* "}"
+    --       | "do" "(" <term>* ")" "[" <term>* "]"
+    --       | "do" "(" <term>* ")" "{|" <term>* "|}"
+    --       | "do" "(" <term>* ")" "[|" <term>* "|]"
     --     | "(" <term>* ")"
     --     |
     --     | "if" ("(" <term>* ")")? "{" <term>* "}"
@@ -2202,7 +2581,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     --     | "[|" seq(<term>*) "|]"
     --     | "loop"
     --     | "match" ("(" <term>* ")")?
-    --       ("case" <pat> <block>)*
+    --       ("case" <pattern> <block>)*
     --       ("else" "{" <term>* "}")?
     --     | <term>* <op> <term>*
     --     | <char-lit>
@@ -2217,14 +2596,207 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     --     | "(" <op> <term>* ")"
     --     | "(" <term>* <op> ")"
     term :: Parser (Term 'Parsed)
-    term = MP.failure Nothing (S.fromList [ME.Label ('T':|"ODO: parse term")])  -- error "TODO: term"
+    term = MP.label "term" do
+      prefix <- asum
 
-    identityTerm = Identity () <$> getSourceLoc
+        -- "(" "as" seq(<sig>) ")"
+        [ MP.try do
+          _ :@ beginLoc <- match GroupBegin
+          types <- match KwdAs *> (basicType `MP.sepEndBy1` match Seq)
+          _ :@ endLoc <- match GroupEnd
+          pure $ AsSection () (beginLoc <> endLoc) (V.fromList types)
+
+        -- "call"
+        , Call () . locdLoc <$> match KwdCall
+
+        -- "do" "(" <term>* ")" "{" <term>* "}"
+        -- TODO: Compute full source location.
+        , Do () <$> (locdLoc <$> match KwdDo) <*> grouped expr <*> blocklike
+
+        -- "(" <term>* ")"
+        , do
+          _ :@ beginLoc <- match GroupBegin
+          body <- expr
+          _ :@ endLoc <- match GroupEnd
+          pure $ Group (beginLoc <> endLoc) body
+
+        --
+        -- , Identity () <$> getSourceLoc
+
+        -- "if" ("(" <term>* ")")? "{" <term>* "}"
+        --   ("elif" "(" <term>* ")" "{" <term>* "}")*
+        --   ("else" "{" <term>* "}")?
+        , do
+          _ :@ beginLoc <- match KwdIf
+          cond <- optional (grouped expr)
+          true <- blockOf expr
+          elifs <- fmap V.fromList . many $ Elif
+            <$> (locdLoc <$> match KwdElif)
+            <*> grouped expr
+            <*> blockOf expr
+          else_ <- optional $ Else
+            <$> (locdLoc <$> match KwdElse)
+            <*> blockOf expr
+          -- TODO: Compute full source location.
+          pure $ If () beginLoc cond true elifs else_
+
+        -- <instantiated-name>
+        , do
+          loc <- getSourceLoc
+          name <- instdName
+          -- TODO: Compute full source location.
+          pure $ Invoke () loc Postfix name
+
+        -- "(" <op> ")"
+        -- , -- note: name part; avoid backtracking. See sections
+
+        -- "jump"
+        , Jump () . locdLoc <$> match KwdJump
+
+        -- "[" seq(<term>*) "]"
+        , do
+          _ :@ beginLoc <- match ListBegin
+          items <- V.fromList <$> (expr `MP.sepEndBy` match Seq)
+          _ :@ endLoc <- match ListEnd
+          pure $ List () (beginLoc <> endLoc) ASCII Box items
+
+        -- "[|" seq(<term>*) "|]"
+        , do
+          _ :@ beginLoc <- match (ArrayBegin ASCII)
+          items <- V.fromList <$> (expr `MP.sepEndBy` match Seq)
+          _ :@ endLoc <- match (ArrayEnd ASCII)
+          pure $ List () (beginLoc <> endLoc) ASCII Unbox items
+
+        -- "⟦" seq(<term>*) "⟧"
+        , do
+          _ :@ beginLoc <- match (ArrayBegin Unicode)
+          items <- V.fromList <$> (expr `MP.sepEndBy` match Seq)
+          _ :@ endLoc <- match (ArrayEnd Unicode)
+          pure $ List () (beginLoc <> endLoc) Unicode Unbox items
+
+        -- "loop"
+        , Loop () . locdLoc <$> match KwdLoop
+
+        -- "match" ("(" <term>* ")")?
+        --   ("case" <pattern>
+        --     ( <block>
+        --     | ("when" "(" <term>* ")" <block>)*
+        --       ("otherwise" <block>)*))*
+        --   ("else" <block>)?
+        , do
+          _ :@ beginLoc <- match KwdMatch
+          scrutinee <- optional (grouped expr)
+          let
+            matchGuard = Guard
+              <$> (locdLoc <$> match KwdWhen)
+              <*> grouped expr
+              <*> blockOf expr
+          cases <- fmap V.fromList . many $ Case
+            -- TODO: Compute full source location.
+            <$> (locdLoc <$> match KwdCase)
+            <*> pat
+            <*> do
+              -- Since guards are optional, require a block if no guards are
+              -- specified to disallow a useless case with no bodies.
+              guards <- V.fromList <$> many matchGuard
+              otherwiseGuard <- optional (match KwdOtherwise *> blockOf expr)
+              case otherwiseGuard of
+                Nothing | V.null guards -> Left <$> blockOf expr
+                _ -> pure (Right (guards, otherwiseGuard))
+          else_ <- optional $ Else
+            <$> (locdLoc <$> match KwdElse)
+            <*> blockOf expr
+          -- TODO: Compute full source location.
+          pure $ Match () beginLoc scrutinee cases else_
+
+{-
+        -- <term>* <op> <term>*
+        , 
+-}
+
+        -- <char-lit>
+        , MP.label "character literal" do
+          Char lit :@ loc <- MP.satisfy
+            ((\ case { Char{} -> True; _ -> False }) . locdItem)
+          pure $ PushChar () loc lit
+
+        -- <float-lit>
+        , MP.label "floating-point literal" do
+          Float lit :@ loc <- MP.satisfy
+            ((\ case { Float{} -> True; _ -> False }) . locdItem)
+          pure $ PushFloat () loc lit
+
+        -- <int-lit>
+        , MP.label "integer literal" do
+          Integer lit :@ loc <- MP.satisfy
+            ((\ case { Integer{} -> True; _ -> False }) . locdItem)
+          pure $ PushInt () loc lit
+
+        -- <para-lit>
+        , MP.label "paragraph literal" do
+          Para lit :@ loc <- MP.satisfy
+            ((\ case { Para{} -> True; _ -> False }) . locdItem)
+          pure $ PushPara () loc lit
+
+        -- <text-lit>
+        , MP.label "text literal" do
+          Text lit :@ loc <- MP.satisfy
+            ((\ case { Para{} -> True; _ -> False }) . locdItem)
+          pure $ PushText () loc lit
+
+{-
+        -- "{" <term>* "}"
+        , 
+
+        -- "{|" <term>* "|}"
+        , 
+
+        -- "\" <term>
+        , 
+-}
+
+        -- "return"
+        , Return () . locdLoc <$> match KwdReturn
+
+{-
+        -- "(" <op> <term>* ")"
+        , -- right section
+
+        -- "(" <term>* <op> ")"
+        , -- left section
+-}
+
+        ]
+      -- <term> "as" "(" <sig> ")"
+      suffixes <- many $ (,)
+        <$> (locdLoc <$> match KwdAs)
+        <*> grouped functionType
+      pure $ foldl' (\ subterm (loc, sig) -> As () loc subterm sig)
+        prefix suffixes
+
+    pat :: Parser (Pat 'Parsed)
+    pat = MP.label "pattern" $ asum
+      [ do
+        -- TODO: Compute full source location.
+        loc <- getSourceLoc
+        name <- unresName
+        pure $ CtorPat loc name
+      -- TODO: More complex patterns.
+      ]
 
     expr :: Parser (Term 'Parsed)
     expr = do
       loc <- getSourceLoc
-      foldl' (Compose ()) (Identity () loc) <$> many term
+      foldl0' (Compose ()) (Identity () loc) <$> many term
+
+    blockOf :: Parser a -> Parser (Block a)
+    blockOf p = Block . V.fromList <$> blocked (p `MP.sepEndBy` match Term)
+
+    blocklike :: Parser (Block (Term 'Parsed))
+    blocklike = asum
+      [ blockOf expr
+      -- TODO: Lambda
+      ]
 
     match :: Tok 'Brack -> Parser (Locd (Tok 'Brack))
     match tok = MP.label (PP.render (pPrint tok))
@@ -2238,6 +2810,9 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
 
     optBlocked :: Parser a -> Parser (Maybe a)
     optBlocked p = Nothing <$ match Term <|> Just <$> blocked p
+
+    optBlockOf :: Parser a -> Parser (Maybe (Block a))
+    optBlockOf p = Nothing <$ match Term <|> Just <$> blockOf p
 
     bracketed :: Parser a -> Parser a
     bracketed = (match ListBegin *>) . (<* match ListEnd)
@@ -2392,3 +2967,18 @@ locRange a b = Loc
   , locEndRow = Row $ MP.unPos $ MP.sourceLine b
   , locEndCol = Col $ MP.unPos $ MP.sourceColumn b
   }
+
+-- | Strict left fold omitting the initial accumulator if the input is empty.
+foldl0' :: (a -> a -> a) -> a -> [a] -> a
+foldl0' _f z [] = z
+foldl0' f _z (x : xs) = foldl' f x xs
+
+readOct :: (Eq a, Num a) => String -> a
+readOct s = case Numeric.readOct s of
+  [(x, "")] -> x
+  _ -> error $ "readOct: non-octal digits ('" <> s <> "')"
+
+readHex :: (Eq a, Num a) => String -> a
+readHex s = case Numeric.readHex s of
+  [(x, "")] -> x
+  _ -> error $ "readHex: non-hexadecimal digits ('" <> s <> "')"
