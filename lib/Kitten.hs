@@ -22,6 +22,7 @@
 module Kitten
   ( Base(..)
   , Block(..)
+  , Box(..)
   , Case(..)
   , CaseDef(..)
   , CaseFields(..)
@@ -35,14 +36,19 @@ module Kitten
   , Esc(..)
   , EscLength(..)
   , Fixity(..)
+  , FloatBits(..)
+  , FloatLit(..)
   , Frag(..)
   , Indented(..)
   , InstDef(..)
   , Instd(..)
+  , IntBits(..)
+  , IntLit(..)
   , Kind(..)
   , Loc(..)
   , Locd(..)
   , MetaDef(..)
+  , ParaLit(..)
   , PermDef(..)
   , Permit(..)
   , Phase(..)
@@ -79,15 +85,16 @@ import Data.Char
 import Data.Foldable (asum, toList)
 import Data.Function (on)
 import Data.Functor ((<&>))
-import Data.List (foldl', groupBy)
+import Data.List (foldl', foldl1', groupBy)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Map (Map)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing)
 import Data.Ord (Down(..), comparing)
 import Data.Proxy (Proxy(..))
 import Data.Ratio ((%))
 import Data.Semigroup (sconcat)
 import Data.Text (Text)
+import Data.Traversable (for)
 import Data.Vector (Vector)
 import Data.Void (Void)
 import GHC.Exts (IsString)
@@ -95,6 +102,7 @@ import GHC.Types (Type)
 import Lens.Micro ((^.), Lens')
 import Text.PrettyPrint.HughesPJClass (Pretty(..))
 import Text.Read (Read(..), readMaybe)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.Text as T
@@ -985,6 +993,16 @@ instance HasLoc (Sig p) where
     VarSig loc n -> (\ loc' -> VarSig loc' n) <$> f loc
     QuantSig loc q s -> (\ loc' -> QuantSig loc' q s) <$> f loc
 
+data Sign :: Type where
+  Minus :: Sign
+  Plus :: Sign
+  deriving (Eq, Show)
+
+applySign :: Num a => Sign -> a -> a
+applySign = \ case
+  Minus -> negate
+  Plus -> id
+
 -- | The name of a source of code.
 data SrcName :: Type where
   FileName :: FilePath -> SrcName
@@ -1112,6 +1130,8 @@ data Term :: Phase -> Type where
 
   -- > "[" (<term>* ("," <term>*)*)? ","? "]"
   -- > "[|" (<term>* ("," <term>*)*)? ","? "|]"
+  --
+  -- TODO: Preserve hint for trailing comma?
   List
     :: Anno p
     -> !Loc
@@ -1189,6 +1209,7 @@ data Term :: Phase -> Type where
   Quotation
     :: Anno p
     -> !Loc
+    -> !Enc
     -> !Box
     -> !(Block (Term p))
     -> Term p
@@ -1213,6 +1234,14 @@ data Term :: Phase -> Type where
     -> !Loc
     -> !(Name p)
     -> !(Term p + Term p)
+    -> Term p
+
+  -- > "with" "(" <permit>* ")" <block>
+  With
+    :: Anno p
+    -> !Loc
+    -> !(Vector (Permit p))
+    -> !(Block (Term p))
     -> Term p
 
 deriving instance (Eq (Anno p), Eq (Name p)) => Eq (Term p)
@@ -1633,19 +1662,22 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       (ML.skipLineComment "//")
       (ML.skipBlockCommentNested "/*" "*/")
 
+    lexeme :: Tokenizer a -> Tokenizer a
+    lexeme = ML.lexeme silence
+
     locdsym :: Text -> Tokenizer (Locd Text)
-    locdsym = ML.lexeme silence . locd . MC.string
+    locdsym = lexeme . locd . MC.string
 
     locdsym' :: Text -> Tok b -> Tokenizer (Locd (Tok b))
     locdsym' sym tok = (tok <$) <$> locdsym sym
 
     locdsymNot :: Tokenizer a -> Text -> Tok b -> Tokenizer (Locd (Tok b))
     locdsymNot exclude sym tok = MP.try $ fmap (fmap (const tok))
-      $ ML.lexeme silence $ locd $ MC.string sym
+      $ lexeme $ locd $ MC.string sym
         <* MP.notFollowedBy (MP.try exclude)
 
     locdkwd :: Text -> Tokenizer (Locd Text)
-    locdkwd = MP.try . ML.lexeme silence . locd
+    locdkwd = MP.try . lexeme . locd
       . (<* MP.notFollowedBy (MP.lookAhead wordChar)) . MC.string
 
     locdkwd' :: Text -> Tok b -> Tokenizer (Locd (Tok b))
@@ -1670,10 +1702,10 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
     operator = T.pack <$> some operatorChar
 
     locdword :: Tokenizer (Locd Text)
-    locdword = ML.lexeme silence $ locd word
+    locdword = lexeme $ locd word
 
     locdop :: Tokenizer (Locd Text)
-    locdop = ML.lexeme silence $ locd operator
+    locdop = lexeme $ locd operator
 
     token :: Tokenizer (Locd (Tok 'Unbrack))
     token = asum
@@ -1722,7 +1754,7 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdsym' "]"      ListEnd
       , locdsym' "\x2237" $ Look Unicode
       -- TODO: Produce a TokErr and continue if closing quote is missing.
-      , locd $ MC.char '\'' *> asum
+      , lexeme . locd $ MC.char '\'' *> asum
         [ Quote <$ MC.char '\''
         , (Char . CharLit ASCII . Left <$> escape)
           <* MC.char '\''
@@ -1730,13 +1762,53 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
             <$> MP.noneOf ("'" :: String))
           <* MC.char '\''
         ]
-      , locd $ MC.char '\x2018' *> asum
+      , lexeme . locd $ MC.char '\x2018' *> asum
         [ (Char . CharLit Unicode . Left <$> escape)
           <* MC.char '\x2019'
         , (Char . CharLit Unicode . Right
             <$> MP.noneOf ("\x2018\x2019" :: String))
           <* MC.char '\x2019'
         ]
+      -- TODO: Produce a TokErr and continue if closing quote is missing.
+      , lexeme . locd $ MC.char '\"' *> asum
+        [ MP.try (MC.string "\"\"" *> MC.eol) *> do
+          (body, spaces) <- let
+
+            loop
+              :: [Vector (Esc + Text)]
+              -> Tokenizer (Vector (Vector (Esc + Text)), Text)
+            loop acc = do
+              spaces <- T.pack <$> many
+                (MP.satisfy ((`notElem` ("\n\r" :: String)) .&&. isSpace))
+              asum
+                [ (V.fromList $ reverse acc, spaces) <$ MC.string "\"\"\""
+                , do
+                  acc' <- (: acc) . prependSpaces spaces
+                    <$> (textLitBody "\"" <* MC.eol)
+                  loop acc'
+                ]
+
+            -- Prepend space prefix to line, maintaining invariant that all
+            -- adjacent characters are coalesced into a single 'Text' value.
+            prependSpaces
+              :: Text
+              -> Vector (Esc + Text)
+              -> Vector (Esc + Text)
+            prependSpaces spaces line
+              | V.null line
+              = V.singleton (Right spaces)
+              | Right text <- V.head line
+              = V.cons (Right (spaces <> text)) (V.tail line)
+              | Left{} <- V.head line
+              = V.cons (Right spaces) line
+
+            in loop []
+
+          Para . ParaLit ASCII <$> traverse (stripParaPrefix spaces) body
+        , Text . TextLit ASCII <$> (textLitBody "\"" <* MC.char '\"')
+        ]
+      , lexeme . locd $ MP.between (MC.char '\x201C') (MC.char '\x201D')
+        (Text . TextLit Unicode <$> textLitBody "\x201C\x201D")
       , locdsymNot operatorChar "\\" Ref
       , locdsym' ","      Seq
       , locdsymNot operatorChar "#" Splice
@@ -1773,9 +1845,102 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , locdkwd' "when"       KwdWhen
       , locdkwd' "with"       KwdWith
 
+      -- Backtrack if sign is not followed by digits.
+      , MP.try $ fmap (Integer ||| Float) <$> numberLit
+
       , fmap (Word . Unqual Infix) <$> locdop
       , fmap (Word . Unqual Postfix) <$> locdword
       ]
+
+    numberLit :: Tokenizer (Locd (IntLit + FloatLit))
+    numberLit = lexeme . locd $ do
+      -- TODO: Replace with unary operators?
+      s <- fromMaybe Plus <$> optional sign
+      (reader, digits, base) <- asum
+        [ MC.char '0' *> asum
+          [ MC.char 'x' *> do
+            digits <- digitsWithSeparators MC.hexDigitChar
+            pure (readHex, catMaybes digits, Hex)
+          , MC.char 'b' *> do
+            digits <- digitsWithSeparators MC.binDigitChar
+            pure (readBin, catMaybes digits, Bin)
+          , MC.char 'o' *> do
+            digits <- digitsWithSeparators MC.octDigitChar
+            pure (readOct, catMaybes digits, Oct)
+          , do
+            digits <- (many . asum)
+              [ Just <$> MC.digitChar
+              , Nothing <$ MC.char '_'
+              ]
+            guard (validDigits digits)
+            pure (read, '0' : catMaybes digits, Dec)
+          ]
+        , do
+          digits <- digitsWithSeparators MC.digitChar
+          pure (read, catMaybes digits, Dec)
+        ]
+      asum
+        -- TODO: non-decimal floating-point numbers.
+        [ guard (base == Dec) *> MC.char '.' *> do
+          mFraction <- optional $ digitsWithSeparators MC.digitChar
+          mFraction' <- for mFraction $ \ fraction -> do
+            guard (validDigits fraction)
+            pure (catMaybes fraction)
+          mExponent <- optional
+            $ MP.oneOf ("Ee\x1D07\x23E8" :: String) *> ((,)
+              <$> (fromMaybe Plus <$> optional sign)
+              <*> many MC.digitChar)
+          bits <- fmap (fromMaybe F64) $ optional $ MC.char 'f' *> do
+            digits <- read @Int <$> some MC.digitChar
+            case digits of
+              32 -> pure F32
+              64 -> pure F64
+              _ -> empty
+          pure $ Right $ FloatLit
+            (applySign s (read (digits <> fromMaybe "" mFraction')))
+            (maybe 0 length mFraction')
+            (maybe 0 (\ (s, p) -> applySign s (read p)) mExponent)
+            bits
+        , do
+          bits <- fmap (fromMaybe I32) $ optional $ asum
+            [ MC.char 'i' *> do
+              digits <- read @Int <$> some MC.digitChar
+              case digits of
+                8 -> pure I8
+                16 -> pure I16
+                32 -> pure I32
+                64 -> pure I64
+                _ -> empty
+            , MC.char 'u' *> do
+              digits <- read @Int <$> some MC.digitChar
+              case digits of
+                8 -> pure U8
+                16 -> pure U16
+                32 -> pure U32
+                64 -> pure U64
+                _ -> empty
+            ]
+          pure $ Left $ IntLit (applySign s (reader digits)) base bits
+        ]
+
+      where
+        digitsWithSeparators digit = do
+          digits <- (:)
+            <$> (Just <$> digit)
+            <*> (many . asum)
+              [ Just <$> digit
+              , Nothing <$ MC.char '_'
+              ]
+          guard (validDigits digits)
+          pure digits
+
+        validDigits = null . takeWhile isNothing . reverse
+
+        sign = asum
+          [ Minus <$ MC.char '-'
+          , Minus <$ MC.char '\x2212'
+          , Plus <$ MC.char '+'
+          ]
 
     escape :: Tokenizer Esc
     escape = MP.label "escape" $ MC.char '\\' *> asum
@@ -1845,6 +2010,29 @@ tokenize srcName row input = case MP.runParser tokenizer name input of
       , Quot <$ MC.char '\"'
       ]
 
+    textLitBody :: String -> Tokenizer (Vector (Esc + Text))
+    textLitBody quotes = V.fromList <$> many
+      (Left <$> escape <|> Right . T.pack <$> some (MP.noneOf ("\n\r\\" <> quotes)))
+
+    stripParaPrefix
+      :: Text
+      -> Vector (Esc + Text)
+      -> Tokenizer (Vector (Esc + Text))
+    stripParaPrefix prefix line
+
+      -- Empty lines needn't have a whitespace prefix.
+      | V.null line
+      = pure line
+
+      -- If the line begins with text, strip the prefix from that text.
+      | Right text <- V.head line
+      , Just suffix <- T.stripPrefix prefix text
+      = pure $ V.cons (Right suffix) (V.tail line)
+
+      -- If the line begins with an escape or text without the prefix, fail.
+      | otherwise
+      -- TODO: Embed TokErr in paragraph literal.
+      = empty
 
 -- | Convert a stream of tokens with layout-sensitive blocks into one that uses
 -- explicit brackets and terminators.
@@ -2577,8 +2765,8 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
     --     | <instantiated-name>
     --     | "(" <op> ")"
     --     | "jump"
-    --     | "[" seq(<term>*) "]"
-    --     | "[|" seq(<term>*) "|]"
+    --     | "[" seq(<term>+) "]"
+    --     | "[|" seq(<term>+) "|]"
     --     | "loop"
     --     | "match" ("(" <term>* ")")?
     --       ("case" <pattern> <block>)*
@@ -2620,23 +2808,20 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
           _ :@ endLoc <- match GroupEnd
           pure $ Group (beginLoc <> endLoc) body
 
-        --
-        -- , Identity () <$> getSourceLoc
-
         -- "if" ("(" <term>* ")")? "{" <term>* "}"
         --   ("elif" "(" <term>* ")" "{" <term>* "}")*
         --   ("else" "{" <term>* "}")?
         , do
           _ :@ beginLoc <- match KwdIf
           cond <- optional (grouped expr)
-          true <- blockOf expr
+          true <- blockOf expr1
           elifs <- fmap V.fromList . many $ Elif
             <$> (locdLoc <$> match KwdElif)
             <*> grouped expr
-            <*> blockOf expr
+            <*> blockOf expr1
           else_ <- optional $ Else
             <$> (locdLoc <$> match KwdElse)
-            <*> blockOf expr
+            <*> blockOf expr1
           -- TODO: Compute full source location.
           pure $ If () beginLoc cond true elifs else_
 
@@ -2653,24 +2838,33 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
         -- "jump"
         , Jump () . locdLoc <$> match KwdJump
 
-        -- "[" seq(<term>*) "]"
+        -- Note [Sequence Items]:
+        --
+        -- We need to use 'expr1' here in order to support trailing commas,
+        -- otherwise @[x,]@ parses as a two-item list where the first expression
+        -- is @x@ and the second is identity.
+
+        -- "[" seq(<term>+) "]"
         , do
           _ :@ beginLoc <- match ListBegin
-          items <- V.fromList <$> (expr `MP.sepEndBy` match Seq)
+          -- See note [Sequence Items].
+          items <- V.fromList <$> (expr1 `MP.sepEndBy` match Seq)
           _ :@ endLoc <- match ListEnd
           pure $ List () (beginLoc <> endLoc) ASCII Box items
 
-        -- "[|" seq(<term>*) "|]"
+        -- "[|" seq(<term>+) "|]"
         , do
           _ :@ beginLoc <- match (ArrayBegin ASCII)
-          items <- V.fromList <$> (expr `MP.sepEndBy` match Seq)
+          -- See note [Sequence Items].
+          items <- V.fromList <$> (expr1 `MP.sepEndBy` match Seq)
           _ :@ endLoc <- match (ArrayEnd ASCII)
           pure $ List () (beginLoc <> endLoc) ASCII Unbox items
 
-        -- "⟦" seq(<term>*) "⟧"
+        -- "⟦" seq(<term>+) "⟧"
         , do
           _ :@ beginLoc <- match (ArrayBegin Unicode)
-          items <- V.fromList <$> (expr `MP.sepEndBy` match Seq)
+          -- See note [Sequence Items].
+          items <- V.fromList <$> (expr1 `MP.sepEndBy` match Seq)
           _ :@ endLoc <- match (ArrayEnd Unicode)
           pure $ List () (beginLoc <> endLoc) Unicode Unbox items
 
@@ -2690,7 +2884,7 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
             matchGuard = Guard
               <$> (locdLoc <$> match KwdWhen)
               <*> grouped expr
-              <*> blockOf expr
+              <*> blockOf expr1
           cases <- fmap V.fromList . many $ Case
             -- TODO: Compute full source location.
             <$> (locdLoc <$> match KwdCase)
@@ -2699,20 +2893,15 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
               -- Since guards are optional, require a block if no guards are
               -- specified to disallow a useless case with no bodies.
               guards <- V.fromList <$> many matchGuard
-              otherwiseGuard <- optional (match KwdOtherwise *> blockOf expr)
+              otherwiseGuard <- optional (match KwdOtherwise *> blockOf expr1)
               case otherwiseGuard of
-                Nothing | V.null guards -> Left <$> blockOf expr
+                Nothing | V.null guards -> Left <$> blockOf expr1
                 _ -> pure (Right (guards, otherwiseGuard))
           else_ <- optional $ Else
             <$> (locdLoc <$> match KwdElse)
-            <*> blockOf expr
+            <*> blockOf expr1
           -- TODO: Compute full source location.
           pure $ Match () beginLoc scrutinee cases else_
-
-{-
-        -- <term>* <op> <term>*
-        , 
--}
 
         -- <char-lit>
         , MP.label "character literal" do
@@ -2744,27 +2933,43 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
             ((\ case { Para{} -> True; _ -> False }) . locdItem)
           pure $ PushText () loc lit
 
-{-
         -- "{" <term>* "}"
-        , 
+        , MP.label "quotation" do
+          _ :@ beginLoc <- match BlockBegin
+          body <- blockContentsOf expr1
+          _ :@ endLoc <- match BlockEnd
+          pure $ Quotation () (beginLoc <> endLoc) ASCII Box body
 
         -- "{|" <term>* "|}"
-        , 
+        , MP.label "unboxed quotation" $ asum
+          [ do
+            _ :@ beginLoc <- match (UnboxedBegin ASCII)
+            body <- blockContentsOf expr1
+            _ :@ endLoc <- match (UnboxedEnd ASCII)
+            pure $ Quotation () (beginLoc <> endLoc) ASCII Unbox body
+          , do
+            _ :@ beginLoc <- match (UnboxedBegin Unicode)
+            body <- blockContentsOf expr1
+            _ :@ endLoc <- match (UnboxedEnd Unicode)
+            pure $ Quotation () (beginLoc <> endLoc) Unicode Unbox body
+          ]
 
         -- "\" <term>
-        , 
--}
+        , MP.label "reference" do
+          _ :@ loc <- match Ref
+          body <- term
+          -- TODO: Compute full source location.
+          pure $ Reference () loc body
 
         -- "return"
         , Return () . locdLoc <$> match KwdReturn
 
-{-
-        -- "(" <op> <term>* ")"
-        , -- right section
-
-        -- "(" <term>* <op> ")"
-        , -- left section
--}
+        -- "with" "(" <permit>* ")" <block>
+        -- TODO: Compute full source location.
+        , With ()
+          <$> (locdLoc <$> match KwdWith)
+          <*> grouped (V.fromList <$> many permit)
+          <*> blockOf expr1
 
         ]
       -- <term> "as" "(" <sig> ")"
@@ -2789,12 +2994,18 @@ parse srcName tokens = case MP.runParser parser (show srcName) tokens of
       loc <- getSourceLoc
       foldl0' (Compose ()) (Identity () loc) <$> many term
 
+    expr1 :: Parser (Term 'Parsed)
+    expr1 = foldl1' (Compose ()) <$> some term
+
     blockOf :: Parser a -> Parser (Block a)
-    blockOf p = Block . V.fromList <$> blocked (p `MP.sepEndBy` match Term)
+    blockOf = blocked . blockContentsOf
+
+    blockContentsOf :: Parser a -> Parser (Block a)
+    blockContentsOf p = Block . V.fromList <$> (p `MP.sepEndBy` match Term)
 
     blocklike :: Parser (Block (Term 'Parsed))
     blocklike = asum
-      [ blockOf expr
+      [ blockOf expr1
       -- TODO: Lambda
       ]
 
@@ -2972,6 +3183,15 @@ locRange a b = Loc
 foldl0' :: (a -> a -> a) -> a -> [a] -> a
 foldl0' _f z [] = z
 foldl0' f _z (x : xs) = foldl' f x xs
+
+readBin :: (Num a) => String -> a
+readBin s = foldl' digit 0 s
+  where
+    digit acc c = acc * 2 + bit c
+    bit = \ case
+      '0' -> 0
+      '1' -> 1
+      _ -> error $ "readBin: non-binary digits ('" <> s <> "')"
 
 readOct :: (Eq a, Num a) => String -> a
 readOct s = case Numeric.readOct s of

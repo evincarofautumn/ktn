@@ -175,10 +175,14 @@ spec = do
         \quux\n\
         \\&"
         `shouldBe`
-        [ Word (Unqual Postfix "foo") :@ Loc testName (Row 10) (Col 1) (Row 10) (Col 4)
-        , Word (Unqual Postfix "bar") :@ Loc testName (Row 10) (Col 5) (Row 10) (Col 8)
-        , Word (Unqual Postfix "baz") :@ Loc testName (Row 11) (Col 1) (Row 11) (Col 4)
-        , Word (Unqual Postfix "quux") :@ Loc testName (Row 12) (Col 1) (Row 12) (Col 5)
+        [ Word (Unqual Postfix "foo")
+          :@ Loc testName (Row 10) (Col 1) (Row 10) (Col 4)
+        , Word (Unqual Postfix "bar")
+          :@ Loc testName (Row 10) (Col 5) (Row 10) (Col 8)
+        , Word (Unqual Postfix "baz")
+          :@ Loc testName (Row 11) (Col 1) (Row 11) (Col 4)
+        , Word (Unqual Postfix "quux")
+          :@ Loc testName (Row 12) (Col 1) (Row 12) (Col 5)
         ]
 
   describe "layout" do
@@ -366,7 +370,7 @@ spec = do
           { fragWords = [WordDef
             { wordDefName = UnresUnqual (Unqual Postfix "nop")
             , wordDefSig = FunSig _ Null Null Null
-            , wordDefBody = Block (V.toList -> [Identity () _])
+            , wordDefBody = Block Null
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -380,7 +384,7 @@ spec = do
               (V.toList -> [Int32])
               (V.toList -> [Int32])
               Null
-            , wordDefBody = Block (V.toList -> [Identity () _])
+            , wordDefBody = Block Null
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -395,7 +399,7 @@ spec = do
               (V.toList -> [Int32, Int32, Int32])
               (V.toList -> [Int32, Int32, Int32])
               Null
-            , wordDefBody = Block (V.toList -> [Identity () _])
+            , wordDefBody = Block Null
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -421,7 +425,7 @@ spec = do
                   ])
                 (V.toList -> [AppSig _ (NameSig "List") (NameSig "B")])
                 Null)
-            , wordDefBody = Block (V.toList -> [Identity () _])
+            , wordDefBody = Block Null
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -463,7 +467,7 @@ spec = do
                     (NameSig "D")
                   ])
                 (V.toList -> [Grant (UnresUnqual (Unqual Postfix "P"))]))
-            , wordDefBody = Block (V.toList -> [Identity () _])
+            , wordDefBody = Block Null
             }]
           } -> pure ()
         other -> assertFailure $ show other
@@ -702,7 +706,8 @@ spec = do
 
     it "parses type def, one ctor, named fields, basic types" do
       case testParse
-        "type Point { case point { x as Float64; y as Float64; z as Float64 } }" of
+        "type Point { case point {\
+        \ x as Float64; y as Float64; z as Float64 } }" of
         Frag
           { fragTypes = [TypeDef
             { typeDefName = UnresUnqual (Unqual Postfix "Point")
@@ -992,6 +997,30 @@ spec = do
           } -> pure ()
         other -> assertFailure $ show other
 
+    it "parses 'as' suffix" do
+      case testParse "1 as (-> Int32)" of
+        Frag
+          { fragTerms =
+            [ As () _
+              (PushInt () _ (IntLit 1 Dec I32))
+              (FunSig _ Null (V.toList -> [Int32]) Null)
+            ]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses multiple 'as' suffixes" do
+      case testParse "1 as (-> Int32) as (-> Int32)" of
+        Frag
+          { fragTerms =
+            [ As () _
+              (As () _
+                (PushInt () _ (IntLit 1 Dec I32))
+                (FunSig _ Null (V.toList -> [Int32]) Null))
+              (FunSig _ Null (V.toList -> [Int32]) Null)
+            ]
+          } -> pure ()
+        other -> assertFailure $ show other
+
     it "parses 'call'" do
       case testParse "call" of
         Frag
@@ -1005,12 +1034,42 @@ spec = do
           { fragTerms =
             [ Do () _
               (Invoke () _ Postfix (Instd (UnqualName "f") Null))
-              (Block (V.toList -> [Invoke () _ Postfix (Instd (UnqualName "g") Null)]))
+              (Block (V.toList ->
+                [Invoke () _ Postfix (Instd (UnqualName "g") Null)]))
             ]
           } -> pure ()
         other -> assertFailure $ show other
 
     -- TODO: Parse 'do' with block-like.
+
+    it "parses 'with' with block and no permits" do
+      case testParse "with () { f }" of
+        Frag
+          { fragTerms =
+            [ With () _
+              Null
+              (Block (V.toList ->
+                [Invoke () _ Postfix (Instd (UnqualName "f") Null)]))
+            ]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses 'with' with permits" do
+      case testParse "with (-Fail +Protect) { f }" of
+        Frag
+          { fragTerms =
+            [ With () _
+              (V.toList ->
+                [ Revoke (UnresUnqual (Unqual Postfix "Fail"))
+                , Grant (UnresUnqual (Unqual Postfix "Protect"))
+                ])
+              (Block (V.toList ->
+                [Invoke () _ Postfix (Instd (UnqualName "f") Null)]))
+            ]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    -- TODO: Parse 'with' with block-like.
 
     it "parses grouped expression" do
       case testParse "(f g h)" of
@@ -1147,6 +1206,314 @@ spec = do
             | actualEnc == expectedEnc
             , actualEsc == expectedEsc -> pure ()
           other -> assertFailure $ show other
+
+    it "parses zero integer literal" do
+      case testParse "0" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 0 Dec I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses decimal integer literal" do
+      case testParse "123" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 123 Dec I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses integer literal with positive sign" do
+      case testParse "+123" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 123 Dec I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses integer literal with ASCII negative sign" do
+      case testParse "-123" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit (-123) Dec I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses integer literal with Unicode negative sign" do
+      case testParse "\x2212\&123" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit (-123) Dec I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses decimal integer literal with signed suffix" do
+      case testParse "123i16" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 123 Dec I16)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses decimal integer literal with digit separators" do
+      case testParse "1_000_000" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 1000000 Dec I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses decimal integer literal with unsigned suffix" do
+      case testParse "123u8" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 123 Dec U8)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses hexadecimal integer literal" do
+      case testParse "0xAB" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 0xAB Hex I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses hexadecimal integer literal with digit separators" do
+      case testParse "0x0F_1E_2D_3C" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 0x0F1E2D3C Hex I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses hexadecimal integer literal with suffix" do
+      case testParse "0xabu8" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 0xAB Hex U8)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses octal integer literal" do
+      case testParse "0o755" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 0o755 Oct I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses binary integer literal" do
+      case testParse "0b1010" of
+        Frag
+          { fragTerms = [PushInt () _ (IntLit 10 Bin I32)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses zero floating-point literal" do
+      case testParse "0.0" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 0 1 0 F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses floating-point literal" do
+      case testParse "1.23" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 123 2 0 F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses floating-point literal with exponent without sign" do
+      case testParse "1.23e2" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 123 2 2 F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses floating-point literal with positive exponent" do
+      case testParse "1.23e+2" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 123 2 2 F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses floating-point literal with ASCII negative exponent" do
+      case testParse "1.23e-2" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 123 2 (-2) F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses floating-point literal with Unicode negative exponent" do
+      case testParse "1.23e\x2212\&2" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 123 2 (-2) F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses floating-point literal with digit separators" do
+      case testParse "1_000.125_000" of
+        Frag
+          { fragTerms = [PushFloat () _ (FloatLit 1000125000 6 0 F64)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses paragraph literal" do
+      case testParse
+        "\"\"\"\n\
+        \All I want is a proper cup of coffee\n\
+        \Made in a proper copper coffee pot\n\
+        \\"\"\"\n\
+        \\&" of
+        Frag
+          { fragTerms = [PushPara () _ (ParaLit ASCII (V.toList ->
+            [ V.toList -> [Right "All I want is a proper cup of coffee"]
+            , V.toList -> [Right "Made in a proper copper coffee pot"]
+            ]))]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses indented paragraph literal" do
+      case testParse
+        "    \"\"\"\n\
+        \    All I want is a proper cup of coffee\n\
+        \    Made in a proper copper coffee pot\n\
+        \    \"\"\"\n\
+        \\&" of
+        Frag
+          { fragTerms = [PushPara () _ (ParaLit ASCII (V.toList ->
+            [ V.toList -> [Right "All I want is a proper cup of coffee"]
+            , V.toList -> [Right "Made in a proper copper coffee pot"]
+            ]))]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty list" do
+      case testParse "[]" of
+        Frag
+          { fragTerms = [List () _ ASCII Box Null]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses singleton list of literal" do
+      case testParse "[1]" of
+        Frag
+          { fragTerms = [List () _ ASCII Box (V.toList ->
+            [PushInt () _ (IntLit 1 Dec I32)])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses singleton list of literal with trailing comma" do
+      case testParse "[1,]" of
+        Frag
+          { fragTerms = [List () _ ASCII Box (V.toList ->
+            [PushInt () _ (IntLit 1 Dec I32)])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses singleton list of literal with trailing comma" do
+      case testParse "[1,]" of
+        Frag
+          { fragTerms = [List () _ ASCII Box (V.toList ->
+            [PushInt () _ (IntLit 1 Dec I32)])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses list of literals" do
+      case testParse "[1, 2, 3]" of
+        Frag
+          { fragTerms = [List () _ ASCII Box (V.toList ->
+            [ PushInt () _ (IntLit 1 Dec I32)
+            , PushInt () _ (IntLit 2 Dec I32)
+            , PushInt () _ (IntLit 3 Dec I32)
+            ])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty ASCII array" do
+      case testParse "[||]" of
+        Frag
+          { fragTerms = [List () _ ASCII Unbox Null]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses ASCII array of literals" do
+      case testParse "[|1u8, 2u8|]" of
+        Frag
+          { fragTerms = [List () _ ASCII Unbox (V.toList ->
+            [ PushInt () _ (IntLit 1 Dec U8)
+            , PushInt () _ (IntLit 2 Dec U8)
+            ])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty Unicode array" do
+      case testParse "\x27E6\x27E7" of
+        Frag
+          { fragTerms = [List () _ Unicode Unbox Null]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses Unicode array of literals" do
+      case testParse "\x27E6\&0x1010u16, 0x2020u16\x27E7" of
+        Frag
+          { fragTerms = [List () _ Unicode Unbox (V.toList ->
+            [ PushInt () _ (IntLit 0x1010 Hex U16)
+            , PushInt () _ (IntLit 0x2020 Hex U16)
+            ])]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty quotation" do
+      case testParse "{}" of
+        Frag
+          { fragTerms =
+            [Quotation () _ ASCII Box (Block Null)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses quotation with single statement" do
+      case testParse "{ f g h }" of
+        Frag
+          { fragTerms = [Quotation () _ ASCII Box (Block (V.toList ->
+            [ (Compose ()
+              (Compose ()
+                (Invoke () _ Postfix (Instd (UnqualName "f") Null))
+                (Invoke () _ Postfix (Instd (UnqualName "g") Null)))
+              (Invoke () _ Postfix (Instd (UnqualName "h") Null)))
+            ]))]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses quotation with multiple statements" do
+      case testParse "{ f; g; h }" of
+        Frag
+          { fragTerms = [Quotation () _ ASCII Box (Block (V.toList ->
+            [ Invoke () _ Postfix (Instd (UnqualName "f") Null)
+            , Invoke () _ Postfix (Instd (UnqualName "g") Null)
+            , Invoke () _ Postfix (Instd (UnqualName "h") Null)
+            ]))]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses layout quotation with multiple statements" do
+      case testParse
+        ":\n\
+        \  f\n\
+        \  g\n\
+        \  h\n\
+        \\&" of
+        Frag
+          { fragTerms = [Quotation () _ ASCII Box (Block (V.toList ->
+            [ Invoke () _ Postfix (Instd (UnqualName "f") Null)
+            , Invoke () _ Postfix (Instd (UnqualName "g") Null)
+            , Invoke () _ Postfix (Instd (UnqualName "h") Null)
+            ]))]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty ASCII unboxed quotation" do
+      case testParse "{||}" of
+        Frag
+          { fragTerms = [Quotation () _ ASCII Unbox (Block Null)]
+          } -> pure ()
+        other -> assertFailure $ show other
+
+    it "parses empty Unicode unboxed quotation" do
+      case testParse "\x2983\x2984" of
+        Frag
+          { fragTerms = [Quotation () _ Unicode Unbox (Block Null)]
+          } -> pure ()
+        other -> assertFailure $ show other
 
 pattern Int32 :: Sig 'Parsed
 pattern Int32 <- VarSig _ (UnqualName "Int32")
